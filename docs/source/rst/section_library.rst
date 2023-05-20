@@ -8,6 +8,9 @@ In order to make your life easier, there are a number of built-in functions that
 structural cross-sections, resulting in :class:`~sectionproperties.pre.geometry.Geometry` objects.
 These typical cross-sections reside in the ``sectionproperties.pre.library`` module.
 
+
+.. _label-primitive-library:
+
 Primitive Sections Library
 ==========================
 
@@ -126,12 +129,19 @@ Bulb Section
       :noindex:
 
 
+.. _label-concrete-library:
+
 Concrete Sections Library
 =========================
 
 Concrete Rectangular Section
 ----------------------------
 ..  autofunction:: sectionproperties.pre.library.concrete_sections.concrete_rectangular_section
+    :noindex:
+
+Concrete Column Section
+-----------------------
+..  autofunction:: sectionproperties.pre.library.concrete_sections.concrete_column_section
     :noindex:
 
 Concrete Tee Section
@@ -144,6 +154,13 @@ Concrete Circular Section
 ..  autofunction:: sectionproperties.pre.library.concrete_sections.concrete_circular_section
     :noindex:
 
+Add Bar
+-------
+..  autofunction:: sectionproperties.pre.library.concrete_sections.add_bar
+    :noindex:
+
+
+.. _label-bridge-library:
 
 Bridge Sections Library
 =======================

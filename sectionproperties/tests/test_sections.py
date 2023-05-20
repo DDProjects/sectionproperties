@@ -1,5 +1,5 @@
-import pathlib
 import pytest
+from pathlib import Path
 
 from sectionproperties.pre.geometry import *
 from sectionproperties.pre.library.primitive_sections import *
@@ -8,15 +8,15 @@ from sectionproperties.pre.library.nastran_sections import *
 from sectionproperties.analysis.section import Section
 from sectionproperties.pre.pre import DEFAULT_MATERIAL, Material
 from sectionproperties.pre.rhino import load_3dm, load_brep_encoding
-from shapely.geometry import (
+from shapely import (
     Polygon,
     MultiPolygon,
     LineString,
     Point,
     GeometryCollection,
     box,
+    wkt,
 )
-from shapely import wkt
 import json
 
 big_sq = rectangular_section(d=300, b=250)
@@ -118,13 +118,26 @@ def test_geometry_from_points():
     ]
     control_points = [[0, 0]]
     holes = [[0, 6], [0, -6]]
-    new_geom = Geometry.from_points(
-        points=points, facets=facets, control_points=control_points, holes=holes
+    material = Material(
+        name="mat1",
+        elastic_modulus=2,
+        poissons_ratio=0.3,
+        density=1e-6,
+        yield_strength=5,
+        color="grey",
     )
-    wkt_test_geom = shapely.wkt.loads(
+    new_geom = Geometry.from_points(
+        points=points,
+        facets=facets,
+        control_points=control_points,
+        holes=holes,
+        material=material,
+    )
+    wkt_test_geom = wkt.loads(
         "POLYGON ((6 10, 6 -10, -6 -10, -6 10, 6 10), (-4 4, 4 4, 4 8, -4 8, -4 4), (4 -8, 4 -4, -4 -4, -4 -8, 4 -8))"
     )
     assert (new_geom.geom - wkt_test_geom) == Polygon()
+    assert (new_geom.material) == material
 
 
 def test_compound_geometry_from_points():
@@ -162,11 +175,34 @@ def test_compound_geometry_from_points():
         [9, 6],
     ]
     control_points = [[0, 0], [0, -2 * a - t / 2]]
-    new_geom = CompoundGeometry.from_points(points, facets, control_points)
-    wkt_test_geom = shapely.wkt.loads(
+    mat1 = Material(
+        name="mat1",
+        elastic_modulus=2,
+        poissons_ratio=0.3,
+        density=1e-6,
+        yield_strength=5,
+        color="grey",
+    )
+    mat2 = Material(
+        name="mat2",
+        elastic_modulus=5,
+        poissons_ratio=0.2,
+        density=2e-6,
+        yield_strength=10,
+        color="blue",
+    )
+    materials = [mat1, mat2]
+    new_geom = CompoundGeometry.from_points(
+        points, facets, control_points, materials=materials
+    )
+    wkt_test_geom = wkt.loads(
         "MULTIPOLYGON (((-0.05 -2, 0.05 -2, 0.05 -0.05, 1 -0.05, 1 0.05, -0.05 0.05, -0.05 -2)), ((-1 -2, 1 -2, 1 -2.1, -1 -2.1, -1 -2)))"
     )
     assert (new_geom.geom - wkt_test_geom) == Polygon()
+
+    # test materials
+    for idx, geom in enumerate(new_geom.geoms):
+        assert geom.material == materials[idx]
 
 
 def test_multi_nested_compound_geometry_from_points():
@@ -215,10 +251,39 @@ def test_multi_nested_compound_geometry_from_points():
     ]
     control_points = [[-43.75, 0.0], [-31.25, 0.0], [-18.75, 0.0]]
     holes = [[0, 0]]
-    nested_compound = CompoundGeometry.from_points(
-        points=points, facets=facets, control_points=control_points, holes=holes
+    mat1 = Material(
+        name="mat1",
+        elastic_modulus=2,
+        poissons_ratio=0.3,
+        density=1e-6,
+        yield_strength=5,
+        color="grey",
     )
-    wkt_test_geom = shapely.wkt.loads(
+    mat2 = Material(
+        name="mat2",
+        elastic_modulus=5,
+        poissons_ratio=0.2,
+        density=2e-6,
+        yield_strength=10,
+        color="blue",
+    )
+    mat3 = Material(
+        name="mat3",
+        elastic_modulus=1,
+        poissons_ratio=0.25,
+        density=1.5e-6,
+        yield_strength=3,
+        color="green",
+    )
+    materials = [mat1, mat2, mat3]
+    nested_compound = CompoundGeometry.from_points(
+        points=points,
+        facets=facets,
+        control_points=control_points,
+        holes=holes,
+        materials=materials,
+    )
+    wkt_test_geom = wkt.loads(
         "MULTIPOLYGON (((50 50, 50 -50, -50 -50, -50 50, 50 50), (12.5 12.5, -12.5 12.5, -12.5 -12.5, 12.5 -12.5, 12.5 12.5)), ((-37.5 -37.5, -37.5 37.5, 37.5 37.5, 37.5 -37.5, -37.5 -37.5), (12.5 12.5, -12.5 12.5, -12.5 -12.5, 12.5 -12.5, 12.5 12.5)), ((-25 -25, -25 25, 25 25, 25 -25, -25 -25), (12.5 12.5, -12.5 12.5, -12.5 -12.5, 12.5 -12.5, 12.5 12.5)))"
     )
     assert (nested_compound.geom - wkt_test_geom) == Polygon()
@@ -229,6 +294,10 @@ def test_multi_nested_compound_geometry_from_points():
         (-18.75, 0.0),
     ]
     assert nested_compound.holes == [(0, 0)]
+
+    # test materials
+    for idx, geom in enumerate(nested_compound.geoms):
+        assert geom.material == materials[idx]
 
     # Section contains overlapping geometries which will result in potentially incorrect
     # plastic properties calculation (depends on user intent and geometry).
@@ -241,9 +310,8 @@ def test_multi_nested_compound_geometry_from_points():
 
 
 def test_geometry_from_dxf():
-    section_holes_dxf = (
-        pathlib.Path.cwd() / "sectionproperties" / "tests" / "section_holes.dxf"
-    )
+    section_holes_dxf = Path(__file__).parent.absolute() / "section_holes.dxf"
+    print(section_holes_dxf)
     assert (
         Geometry.from_dxf(section_holes_dxf).geom.wkt
         == "POLYGON ((-0.338658834889 -0.395177702895, -0.338658834889 29.092318216393, 31.962257588776 29.092318216393, 31.962257588776 -0.395177702895, -0.338658834889 -0.395177702895), (16.684315862478 2.382629883704, 29.683030851053 2.382629883704, 29.683030851053 24.355800152063, 16.684315862478 24.355800152063, 16.684315862478 2.382629883704), (1.548825807288 3.344178663681, 14.547540795863 3.344178663681, 14.547540795863 27.382898163101, 1.548825807288 27.382898163101, 1.548825807288 3.344178663681))"
@@ -315,19 +383,15 @@ def test_plastic_centroid():
 
 
 def test_geometry_from_3dm_file_simple():
-    section = pathlib.Path.cwd() / "sectionproperties" / "tests" / "3in x 2in.3dm"
+    section = Path(__file__).parent.absolute() / "3in x 2in.3dm"
     exp = Polygon([(0, 0), (0, 3), (2, 3), (2, 0), (0, 0)])
     test = Geometry.from_3dm(section)
     assert (test.geom - exp).is_empty
 
 
 def test_geometry_from_3dm_file_complex():
-    section_3dm = (
-        pathlib.Path.cwd() / "sectionproperties" / "tests" / "complex_shape.3dm"
-    )
-    section_wkt = (
-        pathlib.Path.cwd() / "sectionproperties" / "tests" / "complex_shape.txt"
-    )
+    section_3dm = Path(__file__).parent.absolute() / "complex_shape.3dm"
+    section_wkt = Path(__file__).parent.absolute() / "complex_shape.txt"
     with open(section_wkt) as file:
         wkt_str = file.readlines()
     exp = wkt.loads(wkt_str[0])
@@ -336,12 +400,8 @@ def test_geometry_from_3dm_file_complex():
 
 
 def test_geometry_from_3dm_file_compound():
-    section_3dm = (
-        pathlib.Path.cwd() / "sectionproperties" / "tests" / "compound_shape.3dm"
-    )
-    section_wkt = (
-        pathlib.Path.cwd() / "sectionproperties" / "tests" / "compound_shape.txt"
-    )
+    section_3dm = Path(__file__).parent.absolute() / "compound_shape.3dm"
+    section_wkt = Path(__file__).parent.absolute() / "compound_shape.txt"
     with open(section_wkt) as file:
         wkt_str = file.readlines()
     exp = [wkt.loads(wkt_str[0]), wkt.loads(wkt_str[1])]
@@ -350,7 +410,7 @@ def test_geometry_from_3dm_file_compound():
 
 
 def test_geometry_from_3dm_encode():
-    section_3dm = pathlib.Path.cwd() / "sectionproperties" / "tests" / "rhino_data.json"
+    section_3dm = Path(__file__).parent.absolute() / "rhino_data.json"
     with open(section_3dm) as file:
         brep_encoded = json.load(file)
     exp = Polygon([(0, 0), (1, 0), (1, 1), (0, 1), (0, 0)])
@@ -387,17 +447,17 @@ def test_mirror_section():
 
 
 def test_filter_non_polygons():
-    point1 = Point([0, 0])
-    point2 = Point([1, 1])
-    point3 = Point([1, 0])
+    point1 = (0, 0)
+    point2 = (1, 1)
+    point3 = (1, 0)
     line = LineString([point1, point2])
     poly = Polygon([point1, point2, point3])
     multi_poly = MultiPolygon([poly, poly])
-    collection = GeometryCollection([poly, point1, line])
+    collection = GeometryCollection([poly, Point(point1), line])
     out = filter_non_polygons(collection)
     assert filter_non_polygons(poly) == poly
     assert filter_non_polygons(multi_poly) == multi_poly
-    assert filter_non_polygons(point1) == Polygon()
+    assert filter_non_polygons(Point(point1)) == Polygon()
     assert filter_non_polygons(line) == Polygon()
     assert filter_non_polygons(collection) == poly
 
@@ -423,6 +483,9 @@ def test_check_geometry_overlaps():
     small_sq = rectangular_section(d=100, b=75)
     small_hole = rectangular_section(d=40, b=30).align_center(small_sq)
 
+    rect = rectangular_section(d=50, b=50)
+    circ = circular_section(d=50, n=32).shift_section(x_offset=125, y_offset=25)
+
     assert check_geometry_overlaps([small_sq.geom, small_hole.geom]) == True
     assert check_geometry_overlaps([small_sq.geom, small_sq.geom]) == True
     assert (
@@ -437,3 +500,56 @@ def test_check_geometry_overlaps():
         )
         == True
     )
+
+    assert check_geometry_overlaps([rect.geom, circ.geom]) == False
+
+
+def test_check_geometry_disjoint():
+    rect = rectangular_section(d=50, b=50)
+    circ = circular_section(d=50, n=32).shift_section(x_offset=125, y_offset=25)
+
+    small_sq = rectangular_section(d=100, b=75)
+    small_hole = rectangular_section(d=40, b=30).align_center(small_sq)
+
+    rect2 = rectangular_section(d=50, b=50).shift_section(x_offset=50)
+    assert check_geometry_disjoint([rect.geom, rect2.geom]) == False
+
+    rect3 = rectangular_section(d=25, b=25).shift_section(y_offset=50)
+    assert check_geometry_disjoint([rect.geom, rect2.geom, rect3.geom]) == False
+
+    assert check_geometry_disjoint([rect.geom, circ.geom]) == True
+
+    rect2 = rectangular_section(d=50, b=50).shift_section(x_offset=50)
+    assert check_geometry_disjoint([rect.geom, rect2.geom]) == False
+
+
+def test_warping_disjoint_warning():
+    rect = rectangular_section(d=50, b=50)
+    circ = circular_section(d=50, n=32).shift_section(x_offset=125, y_offset=25)
+    geom = (rect + circ).create_mesh([10])
+
+    sec = Section(geom)
+    sec.calculate_geometric_properties()
+    with pytest.warns(UserWarning):
+        sec.calculate_warping_properties()
+
+
+def test_align_center():
+    rect = rectangular_section(d=200, b=70)
+    circ = circular_section(d=200, n=30)
+    rect = rect.rotate_section(-45, rot_point=[0, 0])
+    rect_point = rect.points[1]
+    circ = circ.align_center(rect_point)
+    circ_x, circ_y = circ.calculate_centroid()
+    assert pytest.approx(circ_x) == 49.497474683057995
+    assert pytest.approx(circ_y) == -49.49747468305799
+
+    circ = circ.align_center()
+    circ_x, circ_y = circ.calculate_centroid()
+    assert pytest.approx(circ_x) == 0
+    assert pytest.approx(circ_y) == 0
+
+    circ = circ.align_center(rect)
+    circ_x, circ_y = circ.calculate_centroid()
+    assert pytest.approx(circ_x) == 95.45941546018399
+    assert pytest.approx(circ_y) == 45.961940777125974

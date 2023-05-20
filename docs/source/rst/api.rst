@@ -1,5 +1,5 @@
-Python API Documentation
-========================
+Python API Reference
+====================
 
 Pre-Processor Package
 ---------------------
@@ -198,6 +198,10 @@ concrete_rectangular_section
 """"""""""""""""""""""""""""
 ..  autofunction:: sectionproperties.pre.library.concrete_sections.concrete_rectangular_section
 
+concrete_column_section
+"""""""""""""""""""""""
+..  autofunction:: sectionproperties.pre.library.concrete_sections.concrete_column_section
+
 concrete_tee_section
 """"""""""""""""""""
 ..  autofunction:: sectionproperties.pre.library.concrete_sections.concrete_tee_section
@@ -205,6 +209,10 @@ concrete_tee_section
 concrete_circular_section
 """""""""""""""""""""""""
 ..  autofunction:: sectionproperties.pre.library.concrete_sections.concrete_circular_section
+
+add_bar
+"""""""
+..  autofunction:: sectionproperties.pre.library.concrete_sections.add_bar
 
 
 *bridge_sections* Module
@@ -450,10 +458,6 @@ solve_direct
 solve_direct_lagrange
 """""""""""""""""""""
 ..  autofunction:: sectionproperties.analysis.solver.solve_direct_lagrange
-
-function_timer
-""""""""""""""
-..  autofunction:: sectionproperties.analysis.solver.function_timer
 
 
 Post-Processor Package

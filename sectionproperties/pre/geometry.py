@@ -1,22 +1,23 @@
 from __future__ import annotations
 from ntpath import join
-from typing import List, Optional, Union, Tuple, Any
+from typing import List, Optional, Union, Tuple, List, Any
 
 import copy
+import math
 import pathlib
 import more_itertools
 import numpy as np
-from shapely.geometry import (
+from shapely import (
     Polygon,
     MultiPolygon,
     LineString,
     LinearRing,
     Point,
-    box,
     GeometryCollection,
+    box,
+    affinity,
 )
 from shapely.ops import split, unary_union
-import shapely
 import matplotlib
 import matplotlib.pyplot as plt
 import sectionproperties.pre.pre as pre
@@ -50,9 +51,9 @@ class Geometry:
 
     def __init__(
         self,
-        geom: shapely.geometry.Polygon,
+        geom: Polygon,
         material: pre.Material = pre.DEFAULT_MATERIAL,
-        control_points: Optional[List[float, float]] = None,
+        control_points: Optional[Union[Point, List[float, float]]] = None,
         tol=12,
     ):
         """Inits the Geometry class."""
@@ -63,7 +64,9 @@ class Geometry:
                 f"Argument is not a valid shapely.geometry.Polygon object: {repr(geom)}"
             )
         self.assigned_control_point = None
-        if control_points is not None and len(control_points) == 2:
+        if control_points is not None and (
+            isinstance(control_points, Point) or len(control_points) == 2
+        ):
             self.assigned_control_point = Point(control_points)
         self.tol = (
             tol  # Represents num of decimal places of precision for point locations
@@ -143,10 +146,10 @@ class Geometry:
             being holes or voids. The point can be located anywhere within the hole region.
             Only one point is required per hole region.
         :vartype holes: list[list[float, float]]
-        :cvar materials: Optional. A list of :class:`~sectionproperties.pre.pre.Material` objects that are to be
-            assigned, in order, to the regions defined by the given control_points. If not given, then
-            the :class:`~sectionproperties.pre.pre.DEFAULT_MATERIAL` will be used for each region.
-        :vartype materials: list[:class:`~sectionproperties.pre.pre.Material`]
+        :cvar material: Optional. A :class:`~sectionproperties.pre.pre.Material` object
+            that is to be assigned. If not given, then the
+            :class:`~sectionproperties.pre.pre.DEFAULT_MATERIAL` will be used.
+        :vartype materials: :class:`~sectionproperties.pre.pre.Material`
         """
         if len(control_points) != 1:
             raise ValueError(
@@ -224,7 +227,7 @@ class Geometry:
         :param filepath:
             File path to the rhino `.3dm` file.
         :type filepath: Union[str, pathlib.Path]
-        :param \**kwargs:
+        :param kwargs:
             See below.
         :raises RuntimeError:
             A RuntimeError is raised if two or more polygons are found.
@@ -289,7 +292,7 @@ class Geometry:
         :param r3dm_brep:
             A Rhino3dm.Brep encoded as a string.
         :type r3dm_brep: str
-        :param \**kwargs:
+        :param kwargs:
             See below.
         :return:
             A Geometry object found in the encoded string.
@@ -478,31 +481,47 @@ class Geometry:
 
         return new_geom
 
-    def align_center(self, align_to: Optional[Geometry] = None):
+    def align_center(
+        self, align_to: Optional[Union[Geometry, Tuple[float, float]]] = None
+    ):
         """
         Returns a new Geometry object, translated in both x and y, so that the
-        center-point of the new object's centroid will be aligned with
-        centroid of the object in 'align_to'. If 'align_to' is None then the new
-        object will be aligned with it's centroid at the origin.
+        the new object's centroid will be aligned with the centroid of the object
+        in 'align_to'. If 'align_to' is an x, y coordinate, then the centroid will
+        be aligned to the coordinate. If 'align_to' is None then the new
+        object will be aligned with its centroid at the origin.
 
         :param align_to: Another Geometry to align to or None (default is None)
-        :type align_to: Optional[:class:`~sectionproperties.pre.geometry.Geometry`]
+        :type align_to: Optional[Union[:class:`~sectionproperties.pre.geometry.Geometry`, Tuple[float, float]]]
 
         :return: Geometry object translated to new alignment
         :rtype: :class:`~sectionproperties.pre.geometry.Geometry`
         """
         cx, cy = list(self.geom.centroid.coords)[0]
-        # Suggested by Agent 6-6-6: Hard-rounding of cx and cy allows
+        # Suggested by @Agent6-6-6: Hard-rounding of cx and cy allows
         # for greater precision in placing geometry with its centroid
         # near [0, 0]. True [0, 0] placement will not be possible due
         # to floating point errors.
         if align_to is None:
             shift_x, shift_y = round(-cx, self.tol), round(-cy, self.tol)
 
-        else:
+        elif isinstance(align_to, Geometry):
             align_cx, align_cy = list(align_to.geom.centroid.coords)[0]
             shift_x = round(align_cx - cx, self.tol)
             shift_y = round(align_cy - cy, self.tol)
+
+        else:
+            try:
+                point_x, point_y = align_to
+                shift_x = round(point_x - cx, self.tol)
+                shift_y = round(point_y - cy, self.tol)
+            except (
+                TypeError,
+                ValueError,
+            ):  # align_to not subscriptable, incorrect length, etc.
+                raise ValueError(
+                    f"align_to must be either a Geometry object or an x, y coordinate, not {align_to}."
+                )
         new_geom = self.shift_section(x_offset=shift_x, y_offset=shift_y)
         return new_geom
 
@@ -525,11 +544,11 @@ class Geometry:
         # Move assigned control point
         new_ctrl_point = None
         if self.assigned_control_point:
-            new_ctrl_point = shapely.affinity.translate(
+            new_ctrl_point = affinity.translate(
                 self.assigned_control_point, x_offset, y_offset
             ).coords[0]
         new_geom = Geometry(
-            shapely.affinity.translate(self.geom, x_offset, y_offset),
+            affinity.translate(self.geom, x_offset, y_offset),
             self.material,
             new_ctrl_point,
         )
@@ -566,11 +585,11 @@ class Geometry:
             rotate_point = rot_point
             if rot_point == "center":
                 rotate_point = box(*self.geom.bounds).centroid
-            new_ctrl_point = shapely.affinity.rotate(
+            new_ctrl_point = affinity.rotate(
                 self.assigned_control_point, angle, rotate_point, use_radians
             ).coords[0]
         new_geom = Geometry(
-            shapely.affinity.rotate(self.geom, angle, rot_point, use_radians),
+            affinity.rotate(self.geom, angle, rot_point, use_radians),
             self.material,
             new_ctrl_point,
         )
@@ -606,13 +625,13 @@ class Geometry:
             x_mirror = -x_mirror
         elif axis == "y":
             y_mirror = -y_mirror
-        mirrored_geom = shapely.affinity.scale(
+        mirrored_geom = affinity.scale(
             self.geom, xfact=y_mirror, yfact=x_mirror, zfact=1.0, origin=mirror_point
         )
 
         new_ctrl_point = None
         if self.assigned_control_point:
-            new_ctrl_point = shapely.affinity.scale(
+            new_ctrl_point = affinity.scale(
                 self.assigned_control_point,
                 xfact=y_mirror,
                 yfact=x_mirror,
@@ -658,7 +677,7 @@ class Geometry:
         The following example splits a 200PFC section about the y-axis::
 
             import sectionproperties.pre.library.steel_sections as steel_sections
-            from shapely.geometry import LineString
+            from shapely import LineString
 
             geometry = steel_sections.channel_section(d=200, b=75, t_f=12, t_w=6, r=12, n_r=8)
             right_geom, left_geom = geometry.split_section((0, 0), (0, 1))
@@ -861,7 +880,12 @@ class Geometry:
         return new_geom
 
     def plot_geometry(
-        self, labels=["control_points"], title="Cross-Section Geometry", **kwargs
+        self,
+        labels=["control_points"],
+        title="Cross-Section Geometry",
+        cp=True,
+        legend=True,
+        **kwargs,
     ):
         """Plots the geometry defined by the input section.
 
@@ -870,7 +894,9 @@ class Geometry:
             to indicate no labels. Default is ["control_points"]
         :type labels: list[str]
         :param string title: Plot title
-        :param \**kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
+        :param bool cp: If set to True, plots the control points
+        :param bool legend: If set to True, plots the legend
+        :param kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
 
         :return: Matplotlib axes object
         :rtype: :class:`matplotlib.axes`
@@ -917,14 +943,15 @@ class Geometry:
 
                 ax.plot(h[0], h[1], "rx", markersize=5, markeredgewidth=1, label=label)
 
-            # plot the control points
-            for (i, cp) in enumerate(self.control_points):
-                if i == 0:
-                    label = "Control Points"
-                else:
-                    label = None
+            if cp:
+                # plot the control points
+                for (i, cp) in enumerate(self.control_points):
+                    if i == 0:
+                        label = "Control Points"
+                    else:
+                        label = None
 
-                ax.plot(cp[0], cp[1], "bo", markersize=5, label=label)
+                    ax.plot(cp[0], cp[1], "bo", markersize=5, label=label)
 
             # display the labels
             for label in labels:
@@ -953,7 +980,8 @@ class Geometry:
                         ax.annotate(str(i), xy=pt, color="r")
 
             # display the legend
-            ax.legend(loc="center left", bbox_to_anchor=(1, 0.5))
+            if legend:
+                ax.legend(loc="center left", bbox_to_anchor=(1, 0.5))
 
         return ax
 
@@ -1241,6 +1269,13 @@ class CompoundGeometry(Geometry):
             )
         if holes is None:
             holes = list()
+        if materials is not pre.DEFAULT_MATERIAL:
+            if len(materials) != len(control_points):
+                raise ValueError(
+                    f"If materials are provided, the number of materials in the list must "
+                    "match the number of control_points provided.\n"
+                    f"len(materials)=={len(materials)}, len(control_points)=={len(control_points)}."
+                )
 
         # First, generate all invidual polygons from points and facets
         current_polygon_points = []
@@ -1296,17 +1331,34 @@ class CompoundGeometry(Geometry):
                 f"does not match the number of control_points given ({len(control_points)})."
             )
         if not interiors:
-            return CompoundGeometry(
-                [
-                    Geometry(exterior, control_points=control_points[idx])
-                    for idx, exterior in enumerate(exteriors)
-                ]
-            )
+            if materials is pre.DEFAULT_MATERIAL:
+                return CompoundGeometry(
+                    [
+                        Geometry(
+                            exterior,
+                            control_points=control_points[idx],
+                            material=materials,
+                        )
+                        for idx, exterior in enumerate(exteriors)
+                    ]
+                )
+            else:
+                return CompoundGeometry(
+                    [
+                        Geometry(
+                            exterior,
+                            control_points=control_points[idx],
+                            material=materials[idx],
+                        )
+                        for idx, exterior in enumerate(exteriors)
+                    ]
+                )
+
         else:
             # "Punch" all holes through each exterior geometry
             punched_exteriors = []
             punched_exterior_geometries = []
-            for exterior in exteriors:
+            for idx, exterior in enumerate(exteriors):
                 punched_exterior = exterior
                 for interior in interiors:
                     punched_exterior = punched_exterior - interior
@@ -1321,12 +1373,25 @@ class CompoundGeometry(Geometry):
                             f"Control points given are not contained within the geometry"
                             f" once holes are subtracted: {control_points}"
                         )
-                exterior_geometry = Geometry(
-                    punched_exterior, control_points=exterior_control_point
-                )
-                punched_exterior_geometries.append(exterior_geometry)
+                if materials is pre.DEFAULT_MATERIAL:
 
-        return CompoundGeometry(punched_exterior_geometries)
+                    exterior_geometry = Geometry(
+                        punched_exterior,
+                        control_points=exterior_control_point,
+                        material=materials,
+                    )
+                    punched_exterior_geometries.append(exterior_geometry)
+
+                else:
+
+                    exterior_geometry = Geometry(
+                        punched_exterior,
+                        control_points=exterior_control_point,
+                        material=materials[idx],
+                    )
+                    punched_exterior_geometries.append(exterior_geometry)
+
+            return CompoundGeometry(punched_exterior_geometries)
 
     @classmethod
     def from_3dm(cls, filepath: Union[str, pathlib.Path], **kwargs) -> CompoundGeometry:
@@ -1335,7 +1400,7 @@ class CompoundGeometry(Geometry):
         :param filepath:
             File path to the rhino `.3dm` file.
         :type filepath: Union[str, pathlib.Path]
-        :param \**kwargs:
+        :param kwargs:
             See below.
         :return:
             A `CompoundGeometry` object.
@@ -1508,20 +1573,23 @@ class CompoundGeometry(Geometry):
         new_geom = CompoundGeometry(geoms_acc)
         return new_geom
 
-    def align_center(self, align_to: Optional[Geometry] = None):
+    def align_center(
+        self, align_to: Optional[Union[Geometry, Tuple[float, float]]] = None
+    ):
         """
         Returns a new CompoundGeometry object, translated in both x and y, so that the
         center-point of the new object's material-weighted centroid will be aligned with
-        centroid of the object in 'align_to'. If 'align_to' is None then the new
-        object will be aligned with it's centroid at the origin.
+        centroid of the object in 'align_to'. If 'align_to' is an x, y coordinate, then
+        the centroid will be aligned to the coordinate. If 'align_to' is None then the new
+        object will be aligned with its centroid at the origin.
 
         Note: The material-weighted centroid refers to when individual geometries within
         the CompoundGeometry object have been assigned differing materials. The centroid
         of the compound geometry is calculated by using the E modulus of each
         geometry's assigned material.
 
-        :param align_to: Another Geometry to align to or None (default is None)
-        :type align_to: Optional[:class:`~sectionproperties.pre.geometry.Geometry`]
+        :param align_to: Another Geometry to align to, an xy coordinate, or None (default is None)
+        :type align_to: Optional[Union[:class:`~sectionproperties.pre.geometry.Geometry`, Tuple[float, float]]]
 
         :return: Geometry object translated to new alignment
         :rtype: :class:`~sectionproperties.pre.geometry.Geometry`
@@ -1550,10 +1618,21 @@ class CompoundGeometry(Geometry):
                 round(-weighted_cy, self.tol),
             )
 
-        else:
+        elif isinstance(Geometry):
             align_cx, align_cy = list(align_to.geom.centroid.coords)[0]
             shift_x = round(align_cx - weighted_cx, self.tol)
             shift_y = round(align_cy - weighted_cy, self.tol)
+
+        else:
+            try:
+                point_x, point_y = align_to
+                shift_x = round(point_x - weighted_cx, self.tol)
+                shift_y = round(point_y - weighted_cy, self.tol)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"align_to must be either a Geometry object or an x, y coordinate, not {align_to}."
+                )
+
         new_geom = self.shift_section(x_offset=shift_x, y_offset=shift_y)
         return new_geom
 
@@ -1593,7 +1672,7 @@ class CompoundGeometry(Geometry):
         The following example splits a 200PFC section about the y-axis::
 
             import sectionproperties.pre.library.steel_sections as steel_sections
-            from shapely.geometry import LineString
+            from shapely import LineString
 
             geometry = steel_sections.channel_section(d=200, b=75, t_f=12, t_w=6, r=12, n_r=8)
             right_geom, left_geom = geometry.split_section((0, 0), (0, 1))
@@ -1926,7 +2005,7 @@ def round_polygon_vertices(poly: Polygon, tol: int) -> Polygon:
     for interior in poly.interiors:
         rounded_interiors.append(np.round(interior.coords, tol))
     # print("Exterior: ", rounded_exterior)
-    # print("intterior: ", rounded_interiors)
+    # print("Interior: ", rounded_interiors)
     if not rounded_exterior.any():
         return Polygon()
     return Polygon(rounded_exterior, rounded_interiors)
@@ -1940,4 +2019,38 @@ def check_geometry_overlaps(lop: List[Polygon]) -> bool:
     """
     union_area = unary_union(lop).area
     sum_polygons = sum([poly.area for poly in lop])
-    return union_area != sum_polygons
+    return not math.isclose(union_area, sum_polygons)
+
+
+def check_geometry_disjoint(lop: List[Polygon]) -> bool:
+    """
+    Returns True if any polygons in 'lop' are disjoint. Returns
+    False, otherwise.
+    """
+    # Build polygon connectivity network
+    network = {}
+    for idx_i, poly1 in enumerate(lop):
+        for idx_j, poly2 in enumerate(lop):
+            if idx_i != idx_j:
+                connectivity = network.get(idx_i, set())
+                if poly1.intersection(poly2):
+                    connectivity.add(idx_j)
+                network[idx_i] = connectivity
+
+    def walk_network(node: int, network: dict, nodes_visited: list[int]) -> list[int]:
+        """
+        Walks the network modifying 'nodes_visited' as it walks.
+        """
+        connections = network.get(node, set())
+        for connection in connections:
+            if connection in nodes_visited:
+                continue
+            else:
+                nodes_visited.append(connection)
+                walk_network(connection, network, nodes_visited)
+        return nodes_visited
+
+    # Traverse polygon connectivity network
+    nodes_visited = [0]
+    walk_network(0, network, nodes_visited)
+    return set(nodes_visited) != set(network.keys())

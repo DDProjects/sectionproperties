@@ -1,4 +1,4 @@
-from typing import Union, Optional, Tuple
+from typing import List, Union, Optional, Tuple
 
 import copy
 from dataclasses import dataclass, asdict
@@ -11,6 +11,13 @@ import matplotlib.patches as mpatches
 from matplotlib.colors import ListedColormap, CenteredNorm
 from mpl_toolkits.axes_grid1.axes_divider import make_axes_locatable
 
+from rich.console import Console
+from rich.text import Text
+from rich.live import Live
+from rich.table import Table
+from rich.panel import Panel
+from rich.progress import Progress
+
 import numpy as np
 from scipy.sparse import csc_matrix, coo_matrix, linalg
 from scipy.optimize import brentq
@@ -19,6 +26,9 @@ import sectionproperties.pre.geometry as section_geometry
 import sectionproperties.analysis.fea as fea
 import sectionproperties.analysis.solver as solver
 import sectionproperties.post.post as post
+
+from shapely import Polygon, Point
+from shapely.strtree import STRtree
 
 
 class Section:
@@ -76,6 +86,7 @@ class Section:
         time_info: bool = False,
     ):
         """Inits the Section class."""
+
         if not hasattr(geometry, "mesh") or not geometry.mesh:
             raise ValueError(
                 "Selected Geometry or CompoundGeometry "
@@ -89,105 +100,103 @@ class Section:
         self.materials = []
         mesh = self.mesh
 
-        def init():
-            if isinstance(self.geometry, section_geometry.CompoundGeometry):
-                self.materials = [geom.material for geom in self.geometry.geoms]
-            else:
-                self.materials = [self.geometry.material]
+        if isinstance(self.geometry, section_geometry.CompoundGeometry):
+            self.materials = [geom.material for geom in self.geometry.geoms]
+        else:
+            self.materials = [self.geometry.material]
 
-            # extract mesh data
-            nodes = np.array(mesh["vertices"], dtype=np.dtype(float))
-            elements = np.array(mesh["triangles"], dtype=np.dtype(int))
-            attributes = np.array(mesh["triangle_attributes"].T[0], dtype=np.dtype(int))
+        # extract mesh data
+        nodes = np.array(mesh["vertices"], dtype=np.dtype(float))
+        elements = np.array(mesh["triangles"], dtype=np.dtype(int))
+        attributes = np.array(mesh["triangle_attributes"].T[0], dtype=np.dtype(int))
 
-            # swap mid-node order to retain node ordering consistency
-            elements[:, [3, 4, 5]] = elements[:, [5, 3, 4]]
+        # swap mid-node order to retain node ordering consistency
+        elements[:, [3, 4, 5]] = elements[:, [5, 3, 4]]
 
-            # save total number of nodes in mesh
-            self.num_nodes = len(nodes)
+        # save total number of nodes in mesh
+        self.num_nodes = len(nodes)
 
-            # initialise material_sections variable
-            self.material_groups = []
+        # initialise material_sections variable
+        self.material_groups = []
 
-            # if materials are specified, check that the right number of material properties are
-            # specified and then populate material_groups list
-            if self.materials:
-                msg = "Number of materials ({0}), ".format(len(self.materials))
-                msg += "should match the number of regions ({0}).".format(
-                    max(attributes) + 1
-                )
-                assert len(self.materials) == max(attributes) + 1, msg
+        # if materials are specified, check that the right number of material properties are
+        # specified and then populate material_groups list
+        if self.materials:
+            msg = "Number of materials ({0}), ".format(len(self.materials))
+            msg += "should match the number of regions ({0}).".format(
+                max(attributes) + 1
+            )
+            assert len(self.materials) == max(attributes) + 1, msg
 
-                # add a MaterialGroup object to the material_groups list for each uniquely
-                # encountered material
-                for (i, material) in enumerate(self.materials):
-                    # add the first material to the list
-                    if i == 0:
+            # add a MaterialGroup object to the material_groups list for each uniquely
+            # encountered material
+            for (i, material) in enumerate(self.materials):
+                # add the first material to the list
+                if i == 0:
+                    self.material_groups.append(MaterialGroup(material, self.num_nodes))
+                else:
+                    # if the material hasn't been encountered
+                    if material not in self.materials[:i]:
                         self.material_groups.append(
                             MaterialGroup(material, self.num_nodes)
                         )
-                    else:
-                        # if the material hasn't been encountered
-                        if material not in self.materials[:i]:
-                            self.material_groups.append(
-                                MaterialGroup(material, self.num_nodes)
-                            )
 
-            self.elements = []  # initialise list holding all element objects
+        self.elements = []  # initialise list holding all element objects
 
-            # build the mesh one element at a time
-            for (i, node_ids) in enumerate(elements):
-                x1 = nodes[node_ids[0]][0]
-                y1 = nodes[node_ids[0]][1]
-                x2 = nodes[node_ids[1]][0]
-                y2 = nodes[node_ids[1]][1]
-                x3 = nodes[node_ids[2]][0]
-                y3 = nodes[node_ids[2]][1]
-                x4 = nodes[node_ids[3]][0]
-                y4 = nodes[node_ids[3]][1]
-                x5 = nodes[node_ids[4]][0]
-                y5 = nodes[node_ids[4]][1]
-                x6 = nodes[node_ids[5]][0]
-                y6 = nodes[node_ids[5]][1]
+        # build the mesh one element at a time
+        for (i, node_ids) in enumerate(elements):
+            x1 = nodes[node_ids[0]][0]
+            y1 = nodes[node_ids[0]][1]
+            x2 = nodes[node_ids[1]][0]
+            y2 = nodes[node_ids[1]][1]
+            x3 = nodes[node_ids[2]][0]
+            y3 = nodes[node_ids[2]][1]
+            x4 = nodes[node_ids[3]][0]
+            y4 = nodes[node_ids[3]][1]
+            x5 = nodes[node_ids[4]][0]
+            y5 = nodes[node_ids[4]][1]
+            x6 = nodes[node_ids[5]][0]
+            y6 = nodes[node_ids[5]][1]
 
-                # create a list containing the vertex and mid-node coordinates
-                coords = np.array([[x1, x2, x3, x4, x5, x6], [y1, y2, y3, y4, y5, y6]])
+            # create a list containing the vertex and mid-node coordinates
+            coords = np.array([[x1, x2, x3, x4, x5, x6], [y1, y2, y3, y4, y5, y6]])
 
-                # if materials are specified, get the material
-                if self.materials:
-                    # get attribute index of current element
-                    att_el = attributes[i]
+            # if materials are specified, get the material
+            if self.materials:
+                # get attribute index of current element
+                att_el = attributes[i]
 
-                    # fetch the material
-                    material = self.materials[att_el]
-                # if there are no materials specified, use a default material
-                else:  # Should not happen but included as failsafe
-                    material = pre.DEFAULT_MATERIAL
+                # fetch the material
+                material = self.materials[att_el]
+            # if there are no materials specified, use a default material
+            else:  # Should not happen but included as failsafe
+                material = pre.DEFAULT_MATERIAL
 
-                # add tri6 elements to the mesh
-                new_element = fea.Tri6(i, coords, node_ids, material)
-                self.elements.append(new_element)
+            # add tri6 elements to the mesh
+            new_element = fea.Tri6(i, coords, node_ids, material)
+            self.elements.append(new_element)
 
-                # add element to relevant MaterialGroup
-                for group in self.material_groups:
-                    if material is group.material:
-                        group.add_element(new_element)
-                        break
+            # add element to relevant MaterialGroup
+            for group in self.material_groups:
+                if material is group.material:
+                    group.add_element(new_element)
+                    break
 
-            # save mesh input
-            self.mesh = mesh
-            self.mesh_nodes = nodes
-            self.mesh_elements = elements
-            self.mesh_attributes = attributes
+        # save mesh input
+        self.mesh = mesh
+        self.mesh_nodes = nodes
+        self.mesh_elements = elements
+        self.mesh_attributes = attributes
 
-            # initialise class storing section properties
-            self.section_props = SectionProperties()
+        # create the search tree
+        p_mesh = [
+            Polygon(self.geometry.mesh["vertices"][tri][0:3])
+            for tri in self.geometry.mesh["triangles"]
+        ]
+        self.mesh_search_tree = STRtree(p_mesh)
 
-        if self.time_info:
-            text = "--Initialising the Section class..."
-            solver.function_timer(text, init)
-        else:
-            init()
+        # initialise class storing section properties
+        self.section_props = SectionProperties()
 
     def calculate_geometric_properties(self):
         """Calculates the geometric properties of the cross-section and stores them in the
@@ -218,7 +227,7 @@ class Section:
             section.calculate_geometric_properties()
         """
 
-        def calculate_geom():
+        def calculate_geom(progress=None):
             # initialise properties
             self.section_props.area = 0
             self.section_props.perimeter = 0
@@ -233,6 +242,12 @@ class Section:
 
             # calculate perimeter
             self.section_props.perimeter = self.geometry.calculate_perimeter()
+
+            if progress is not None:
+                task = progress.add_task(
+                    description="[red]Calculating geometric properties",
+                    total=len(self.elements),
+                )
 
             # calculate global geometric properties
             for el in self.elements:
@@ -257,6 +272,9 @@ class Section:
                 self.section_props.iyy_g += iyy_g * e
                 self.section_props.ixy_g += ixy_g * e
 
+                if progress is not None:
+                    progress.update(task, advance=1)
+
             self.section_props.nu_eff = (
                 self.section_props.ea / (2 * self.section_props.ga) - 1
             )
@@ -265,9 +283,31 @@ class Section:
             self.section_props.calculate_elastic_centroid()
             self.section_props.calculate_centroidal_properties(self.mesh)
 
+            if progress is not None:
+                progress.update(
+                    task,
+                    description="[bold green]:white_check_mark: Geometric analysis complete",
+                )
+
+        # conduct geometric analysis
         if self.time_info:
-            text = "--Calculating geometric section properties..."
-            solver.function_timer(text, calculate_geom)
+            progress = solver.create_progress()
+
+            progress_table = Table.grid()
+            panel = Panel.fit(
+                progress,
+                title="[bold]Geometric Analysis",
+                border_style="red",
+                padding=(1, 1),
+            )
+            progress_table.add_row(panel)
+
+            with Live(progress_table, refresh_per_second=10) as live:
+                calculate_geom(progress=progress)
+                panel.border_style = "green"
+                live.refresh()
+
+            print()
         else:
             calculate_geom()
 
@@ -310,6 +350,18 @@ class Section:
             err = "Calculate geometric properties before performing a warping analysis."
             raise RuntimeError(err)
 
+        # check if any geometry are disjoint
+        if isinstance(self.geometry, section_geometry.CompoundGeometry):
+            polygons = [sec_geom.geom for sec_geom in self.geometry.geoms]
+            disjoint_regions = section_geometry.check_geometry_disjoint(polygons)
+            if disjoint_regions:
+                warnings.warn(
+                    "\nThe section geometry contains disjoint regions which is invalid for warping analysis.\n"
+                    "Please revise your geometry to ensure there is connectivity between all regions.\n"
+                    "Please see https://sectionproperties.readthedocs.io/en/latest/rst/analysis.html#warping-analysis for more "
+                    "information."
+                )
+
         # create a new Section with the origin shifted to the centroid for calculation of the
         # warping properties such that the Lagrangian multiplier approach can be utilised
         warping_section = Section(self.geometry)
@@ -319,174 +371,255 @@ class Section:
             el.coords[0, :] -= self.section_props.cx
             el.coords[1, :] -= self.section_props.cy
 
-        # assemble stiffness matrix and load vector for warping function
-        if self.time_info:
-            text = "--Assembling {0}x{0} stiffness matrix and load vector...".format(
-                self.num_nodes
-            )
-            (k, k_lg, f_torsion) = solver.function_timer(
-                text, warping_section.assemble_torsion
-            )
-        else:
-            (k, k_lg, f_torsion) = warping_section.assemble_torsion()
+        # entire warping analysis is contained in following definition
+        def warping_analysis(progress=None):
+            # assemble stiffness matrix and load vector for warping function
+            if progress:
+                task = progress.add_task(
+                    description="[red]Assembling {0}x{0} stiffness matrix".format(
+                        self.num_nodes
+                    ),
+                    total=len(warping_section.elements),
+                )
+                (k_lg, f_torsion) = warping_section.assemble_torsion(
+                    progress=progress, task=task
+                )
 
-        # ILU decomposition of stiffness matrices
-        def ilu_decomp():
-            # ILU decomposition on regular stiffness matrix
-            k_precond = linalg.LinearOperator(
-                (self.num_nodes, self.num_nodes), linalg.spilu(k).solve
-            )
-
-            # ILU decomposition on Lagrangian stiffness matrix
-            k_lg_precond = linalg.LinearOperator(
-                (self.num_nodes + 1, self.num_nodes + 1), linalg.spilu(k_lg).solve
-            )
-
-            return (k_precond, k_lg_precond)
-
-        # if the cgs method is used, perform ILU decomposition
-        if solver_type == "cgs":
-            if self.time_info:
-                text = "--Performing ILU decomposition on the stiffness matrices..."
-                (k_precond, k_lg_precond) = solver.function_timer(text, ilu_decomp)
+                progress.update(
+                    task,
+                    description="[green]:white_check_mark: {0}x{0} stiffness matrix assembled".format(
+                        self.num_nodes
+                    ),
+                )
+                progress.update(0, advance=1)
             else:
-                (k_precond, k_lg_precond) = ilu_decomp()
+                (k_lg, f_torsion) = warping_section.assemble_torsion()
 
-        # solve for warping function
-        def solve_warping():
+            # ILU decomposition of stiffness matrices
+            def ilu_decomp(progress=None, task=None):
+                # ILU decomposition on regular stiffness matrix
+                k_precond = linalg.LinearOperator(
+                    (self.num_nodes, self.num_nodes), linalg.spilu(k).solve
+                )
+
+                if progress is not None:
+                    progress.update(task, advance=1)
+
+                # ILU decomposition on Lagrangian stiffness matrix
+                k_lg_precond = linalg.LinearOperator(
+                    (self.num_nodes + 1, self.num_nodes + 1), linalg.spilu(k_lg).solve
+                )
+
+                if progress is not None:
+                    progress.update(task, advance=1)
+
+                return (k_precond, k_lg_precond)
+
+            # if the cgs method is used, perform ILU decomposition
             if solver_type == "cgs":
-                omega = solver.solve_cgs(k, f_torsion, k_precond)
-            elif solver_type == "direct":
-                omega = solver.solve_direct(k, f_torsion)
+                if progress:
+                    task = progress.add_task(
+                        description="[red]Performing ILU decomposition",
+                        total=2,
+                    )
+                    (k_precond, k_lg_precond) = ilu_decomp(progress=progress, task=task)
 
-            return omega
+                    progress.update(
+                        task,
+                        description="[green]:white_check_mark: ILU decomposition complete",
+                    )
+                else:
+                    (k_precond, k_lg_precond) = ilu_decomp()
 
-        if self.time_info:
-            text = "--Solving for the warping function using the {0} solver...".format(
-                solver_type
-            )
-            omega = solver.function_timer(text, solve_warping)
-        else:
-            omega = solve_warping()
+            # solve for warping function
+            def solve_warping():
+                if solver_type == "cgs":
+                    omega = solver.solve_cgs_lagrange(k_lg, f_torsion, m=k_lg_precond)
+                elif solver_type == "direct":
+                    omega = solver.solve_direct_lagrange(k_lg, f_torsion)
 
-        # save the warping function
-        self.section_props.omega = omega
+                return omega
 
-        # determine the torsion constant
-        def j_func():
-            return (
+            if progress:
+                task = progress.add_task(
+                    description="[red]Solving warping function ({0})".format(
+                        solver_type
+                    ),
+                    total=1,
+                )
+                omega = solve_warping()
+                progress.update(task, advance=1)
+
+                progress.update(
+                    task,
+                    description="[green]:white_check_mark: Warping function solved ({0})".format(
+                        solver_type
+                    ),
+                )
+                progress.update(0, advance=1)
+            else:
+                omega = solve_warping()
+
+            # save the warping function
+            self.section_props.omega = omega
+
+            # determine the torsion constant
+            self.section_props.j = (
                 self.section_props.ixx_c
                 + self.section_props.iyy_c
-                - omega.dot(k.dot(np.transpose(omega)))
+                - omega.dot(k_lg[:-1, :-1].dot(np.transpose(omega)))
             )
 
-        if self.time_info:
-            text = "--Computing the torsion constant..."
-            self.section_props.j = solver.function_timer(text, j_func)
-        else:
-            self.section_props.j = j_func()
+            # assemble shear function load vectors
+            def assemble_shear_load(progress=None, task=None):
+                f_psi = np.zeros(self.num_nodes)
+                f_phi = np.zeros(self.num_nodes)
 
-        # assemble shear function load vectors
-        def assemble_shear_load():
-            f_psi = np.zeros(self.num_nodes)
-            f_phi = np.zeros(self.num_nodes)
+                for el in warping_section.elements:
+                    (f_psi_el, f_phi_el) = el.shear_load_vectors(
+                        self.section_props.ixx_c,
+                        self.section_props.iyy_c,
+                        self.section_props.ixy_c,
+                        self.section_props.nu_eff,
+                    )
+                    f_psi[el.node_ids] += f_psi_el
+                    f_phi[el.node_ids] += f_phi_el
 
-            for el in warping_section.elements:
-                (f_psi_el, f_phi_el) = el.shear_load_vectors(
-                    self.section_props.ixx_c,
-                    self.section_props.iyy_c,
-                    self.section_props.ixy_c,
-                    self.section_props.nu_eff,
+                    if progress is not None:
+                        progress.update(task, advance=1)
+
+                return (f_psi, f_phi)
+
+            if progress:
+                task = progress.add_task(
+                    description="[red]Assembling shear function vectors",
+                    total=len(warping_section.elements),
                 )
-                f_psi[el.node_ids] += f_psi_el
-                f_phi[el.node_ids] += f_phi_el
+                (f_psi, f_phi) = assemble_shear_load(progress=progress, task=task)
 
-            return (f_psi, f_phi)
+                progress.update(
+                    task,
+                    description="[green]:white_check_mark: Shear function vectors assembled",
+                )
+                progress.update(0, advance=1)
+            else:
+                (f_psi, f_phi) = assemble_shear_load()
 
-        if self.time_info:
-            text = "--Assembling shear function load vectors..."
-            (f_psi, f_phi) = solver.function_timer(text, assemble_shear_load)
-        else:
-            (f_psi, f_phi) = assemble_shear_load()
+            # solve for shear functions psi and phi
+            def solve_shear_functions(progress=None, task=None):
+                if solver_type == "cgs":
+                    psi_shear = solver.solve_cgs_lagrange(k_lg, f_psi, m=k_lg_precond)
 
-        # solve for shear functions psi and phi
-        def solve_shear_functions():
-            if solver_type == "cgs":
-                psi_shear = solver.solve_cgs_lagrange(k_lg, f_psi, m=k_lg_precond)
-                phi_shear = solver.solve_cgs_lagrange(k_lg, f_phi, m=k_lg_precond)
-            elif solver_type == "direct":
-                psi_shear = solver.solve_direct_lagrange(k_lg, f_psi)
-                phi_shear = solver.solve_direct_lagrange(k_lg, f_phi)
+                    if progress is not None:
+                        progress.update(task, advance=1)
 
-            return (psi_shear, phi_shear)
+                    phi_shear = solver.solve_cgs_lagrange(k_lg, f_phi, m=k_lg_precond)
 
-        if self.time_info:
-            text = "--Solving for the shear functions using the {0} solver...".format(
-                solver_type
-            )
-            (psi_shear, phi_shear) = solver.function_timer(text, solve_shear_functions)
-        else:
-            (psi_shear, phi_shear) = solve_shear_functions()
+                    if progress is not None:
+                        progress.update(task, advance=1)
+                elif solver_type == "direct":
+                    psi_shear = solver.solve_direct_lagrange(k_lg, f_psi)
 
-        # save the shear functions
-        self.section_props.psi_shear = psi_shear
-        self.section_props.phi_shear = phi_shear
+                    if progress is not None:
+                        progress.update(task, advance=1)
 
-        # assemble shear centre and warping moment integrals
-        def assemble_sc_warping_integrals():
-            sc_xint = 0
-            sc_yint = 0
-            q_omega = 0
-            i_omega = 0
-            i_xomega = 0
-            i_yomega = 0
+                    phi_shear = solver.solve_direct_lagrange(k_lg, f_phi)
 
-            for el in warping_section.elements:
+                    if progress is not None:
+                        progress.update(task, advance=1)
+
+                return (psi_shear, phi_shear)
+
+            if progress:
+                task = progress.add_task(
+                    description="[red]Solving shear functions ({0})".format(
+                        solver_type
+                    ),
+                    total=2,
+                )
+                (psi_shear, phi_shear) = solve_shear_functions(
+                    progress=progress, task=task
+                )
+
+                progress.update(
+                    task,
+                    description="[green]:white_check_mark: Shear functions solved ({0})".format(
+                        solver_type
+                    ),
+                )
+                progress.update(0, advance=1)
+            else:
+                (psi_shear, phi_shear) = solve_shear_functions()
+
+            # save the shear functions
+            self.section_props.psi_shear = psi_shear
+            self.section_props.phi_shear = phi_shear
+
+            # assemble shear centre and warping moment integrals
+            def assemble_sc_warping_integrals(progress=None, task=None):
+                sc_xint = 0
+                sc_yint = 0
+                q_omega = 0
+                i_omega = 0
+                i_xomega = 0
+                i_yomega = 0
+
+                for el in warping_section.elements:
+                    (
+                        sc_xint_el,
+                        sc_yint_el,
+                        q_omega_el,
+                        i_omega_el,
+                        i_xomega_el,
+                        i_yomega_el,
+                    ) = el.shear_warping_integrals(
+                        self.section_props.ixx_c,
+                        self.section_props.iyy_c,
+                        self.section_props.ixy_c,
+                        omega[el.node_ids],
+                    )
+
+                    sc_xint += sc_xint_el
+                    sc_yint += sc_yint_el
+                    q_omega += q_omega_el
+                    i_omega += i_omega_el
+                    i_xomega += i_xomega_el
+                    i_yomega += i_yomega_el
+
+                    if progress is not None:
+                        progress.update(task, advance=1)
+
+                return (sc_xint, sc_yint, q_omega, i_omega, i_xomega, i_yomega)
+
+            if progress:
+                task = progress.add_task(
+                    description="[red]Assembling shear and warping integrals",
+                    total=len(warping_section.elements),
+                )
                 (
-                    sc_xint_el,
-                    sc_yint_el,
-                    q_omega_el,
-                    i_omega_el,
-                    i_xomega_el,
-                    i_yomega_el,
-                ) = el.shear_warping_integrals(
-                    self.section_props.ixx_c,
-                    self.section_props.iyy_c,
-                    self.section_props.ixy_c,
-                    omega[el.node_ids],
+                    sc_xint,
+                    sc_yint,
+                    q_omega,
+                    i_omega,
+                    i_xomega,
+                    i_yomega,
+                ) = assemble_sc_warping_integrals(progress=progress, task=task)
+
+                progress.update(
+                    task,
+                    description="[green]:white_check_mark: Shear and warping integrals assembled",
                 )
+                progress.update(0, advance=1)
+            else:
+                (
+                    sc_xint,
+                    sc_yint,
+                    q_omega,
+                    i_omega,
+                    i_xomega,
+                    i_yomega,
+                ) = assemble_sc_warping_integrals()
 
-                sc_xint += sc_xint_el
-                sc_yint += sc_yint_el
-                q_omega += q_omega_el
-                i_omega += i_omega_el
-                i_xomega += i_xomega_el
-                i_yomega += i_yomega_el
-
-            return (sc_xint, sc_yint, q_omega, i_omega, i_xomega, i_yomega)
-
-        if self.time_info:
-            text = "--Assembling shear centre and warping moment integrals..."
-            (
-                sc_xint,
-                sc_yint,
-                q_omega,
-                i_omega,
-                i_xomega,
-                i_yomega,
-            ) = solver.function_timer(text, assemble_sc_warping_integrals)
-        else:
-            (
-                sc_xint,
-                sc_yint,
-                q_omega,
-                i_omega,
-                i_xomega,
-                i_yomega,
-            ) = assemble_sc_warping_integrals()
-
-        # calculate shear centres
-        def shear_centres():
             # calculate shear centres (elasticity approach)
             Delta_s = (
                 2
@@ -522,139 +655,191 @@ class Section:
                 - self.section_props.ixy_c**2
             )
 
-            return (Delta_s, x_se, y_se, x11_se, y22_se, x_st, y_st)
+            # save shear centres
+            self.section_props.Delta_s = Delta_s
+            self.section_props.x_se = x_se
+            self.section_props.y_se = y_se
+            self.section_props.x11_se = x11_se
+            self.section_props.y22_se = y22_se
+            self.section_props.x_st = x_st
+            self.section_props.y_st = y_st
 
-        if self.time_info:
-            text = "--Calculating shear centres..."
-            (Delta_s, x_se, y_se, x11_se, y22_se, x_st, y_st) = solver.function_timer(
-                text, shear_centres
+            # calculate warping constant
+            self.section_props.gamma = (
+                i_omega
+                - q_omega**2 / self.section_props.ea
+                - y_se * i_xomega
+                + x_se * i_yomega
             )
-        else:
-            (Delta_s, x_se, y_se, x11_se, y22_se, x_st, y_st) = shear_centres()
 
-        # save shear centres
-        self.section_props.Delta_s = Delta_s
-        self.section_props.x_se = x_se
-        self.section_props.y_se = y_se
-        self.section_props.x11_se = x11_se
-        self.section_props.y22_se = y22_se
-        self.section_props.x_st = x_st
-        self.section_props.y_st = y_st
+            def assemble_shear_deformation(progress=None, task=None):
+                # assemble shear deformation coefficients
+                kappa_x = 0
+                kappa_y = 0
+                kappa_xy = 0
 
-        # calculate warping constant
-        self.section_props.gamma = (
-            i_omega
-            - q_omega**2 / self.section_props.ea
-            - y_se * i_xomega
-            + x_se * i_yomega
-        )
+                for el in warping_section.elements:
+                    (kappa_x_el, kappa_y_el, kappa_xy_el) = el.shear_coefficients(
+                        self.section_props.ixx_c,
+                        self.section_props.iyy_c,
+                        self.section_props.ixy_c,
+                        psi_shear[el.node_ids],
+                        phi_shear[el.node_ids],
+                        self.section_props.nu_eff,
+                    )
 
-        def assemble_shear_deformation():
-            # assemble shear deformation coefficients
-            kappa_x = 0
-            kappa_y = 0
-            kappa_xy = 0
+                    kappa_x += kappa_x_el
+                    kappa_y += kappa_y_el
+                    kappa_xy += kappa_xy_el
 
-            for el in warping_section.elements:
-                (kappa_x_el, kappa_y_el, kappa_xy_el) = el.shear_coefficients(
-                    self.section_props.ixx_c,
-                    self.section_props.iyy_c,
-                    self.section_props.ixy_c,
-                    psi_shear[el.node_ids],
-                    phi_shear[el.node_ids],
-                    self.section_props.nu_eff,
+                    if progress is not None:
+                        progress.update(task, advance=1)
+
+                return (kappa_x, kappa_y, kappa_xy)
+
+            if progress:
+                task = progress.add_task(
+                    description="[red]Assembling shear deformation coefficients",
+                    total=len(warping_section.elements),
+                )
+                (kappa_x, kappa_y, kappa_xy) = assemble_shear_deformation(
+                    progress=progress, task=task
                 )
 
-                kappa_x += kappa_x_el
-                kappa_y += kappa_y_el
-                kappa_xy += kappa_xy_el
+                progress.update(
+                    task,
+                    description="[green]:white_check_mark: Shear deformation coefficients assembled",
+                )
+                progress.update(0, advance=1)
+            else:
+                (kappa_x, kappa_y, kappa_xy) = assemble_shear_deformation()
 
-            return (kappa_x, kappa_y, kappa_xy)
+            # calculate shear areas wrt global axis
+            self.section_props.A_sx = Delta_s**2 / kappa_x
+            self.section_props.A_sy = Delta_s**2 / kappa_y
+            self.section_props.A_sxy = Delta_s**2 / kappa_xy
 
-        if self.time_info:
-            text = "--Assembling shear deformation coefficients..."
-            (kappa_x, kappa_y, kappa_xy) = solver.function_timer(
-                text, assemble_shear_deformation
+            # calculate shear areas wrt principal bending axis:
+            alpha_xx = kappa_x * self.section_props.area / Delta_s**2
+            alpha_yy = kappa_y * self.section_props.area / Delta_s**2
+            alpha_xy = kappa_xy * self.section_props.area / Delta_s**2
+
+            # rotate the tensor by the principal axis angle
+            phi_rad = self.section_props.phi * np.pi / 180
+            R = np.array(
+                [
+                    [np.cos(phi_rad), np.sin(phi_rad)],
+                    [-np.sin(phi_rad), np.cos(phi_rad)],
+                ]
             )
-        else:
-            (kappa_x, kappa_y, kappa_xy) = assemble_shear_deformation()
 
-        # calculate shear areas wrt global axis
-        self.section_props.A_sx = Delta_s**2 / kappa_x
-        self.section_props.A_sy = Delta_s**2 / kappa_y
-        self.section_props.A_sxy = Delta_s**2 / kappa_xy
+            rotatedAlpha = R.dot(
+                np.array([[alpha_xx, alpha_xy], [alpha_xy, alpha_yy]])
+            ).dot(np.transpose(R))
 
-        # calculate shear areas wrt principal bending axis:
-        alpha_xx = kappa_x * self.section_props.area / Delta_s**2
-        alpha_yy = kappa_y * self.section_props.area / Delta_s**2
-        alpha_xy = kappa_xy * self.section_props.area / Delta_s**2
+            # recalculate the shear area based on the rotated alpha value
+            self.section_props.A_s11 = self.section_props.area / rotatedAlpha[0, 0]
+            self.section_props.A_s22 = self.section_props.area / rotatedAlpha[1, 1]
 
-        # rotate the tensor by the principal axis angle
-        phi_rad = self.section_props.phi * np.pi / 180
-        R = np.array(
-            [[np.cos(phi_rad), np.sin(phi_rad)], [-np.sin(phi_rad), np.cos(phi_rad)]]
-        )
+            # calculate the monosymmetry consants
+            def calculate_monosymmetry_integrals(progress=None, task=None):
+                int_x = 0
+                int_y = 0
+                int_11 = 0
+                int_22 = 0
 
-        rotatedAlpha = R.dot(
-            np.array([[alpha_xx, alpha_xy], [alpha_xy, alpha_yy]])
-        ).dot(np.transpose(R))
+                for el in warping_section.elements:
+                    (
+                        int_x_el,
+                        int_y_el,
+                        int_11_el,
+                        int_22_el,
+                    ) = el.monosymmetry_integrals(self.section_props.phi)
 
-        # recalculate the shear area based on the rotated alpha value
-        self.section_props.A_s11 = self.section_props.area / rotatedAlpha[0, 0]
-        self.section_props.A_s22 = self.section_props.area / rotatedAlpha[1, 1]
+                    int_x += int_x_el
+                    int_y += int_y_el
+                    int_11 += int_11_el
+                    int_22 += int_22_el
 
-        # calculate the monosymmetry consants
-        def calculate_monosymmetry_integrals():
-            int_x = 0
-            int_y = 0
-            int_11 = 0
-            int_22 = 0
+                    if progress is not None:
+                        progress.update(task, advance=1)
 
-            for el in warping_section.elements:
-                (int_x_el, int_y_el, int_11_el, int_22_el) = el.monosymmetry_integrals(
-                    self.section_props.phi
+                return (int_x, int_y, int_11, int_22)
+
+            if progress:
+                task = progress.add_task(
+                    description="[red]Assembling monosymmetry integrals",
+                    total=len(self.elements),
+                )
+                (int_x, int_y, int_11, int_22) = calculate_monosymmetry_integrals(
+                    progress=progress, task=task
                 )
 
-                int_x += int_x_el
-                int_y += int_y_el
-                int_11 += int_11_el
-                int_22 += int_22_el
+                progress.update(
+                    task,
+                    description="[green]:white_check_mark: Monosymmetry integrals assembled",
+                )
+                progress.update(0, advance=1)
+            else:
+                (int_x, int_y, int_11, int_22) = calculate_monosymmetry_integrals()
 
-            return (int_x, int_y, int_11, int_22)
-
-        if self.time_info:
-            text = "--Assembling monosymmetry integrals..."
-            (int_x, int_y, int_11, int_22) = solver.function_timer(
-                text, calculate_monosymmetry_integrals
+            # calculate the monosymmetry constants
+            self.section_props.beta_x_plus = (
+                -int_x / self.section_props.ixx_c + 2 * self.section_props.y_se
             )
-        else:
-            (int_x, int_y, int_11, int_22) = calculate_monosymmetry_integrals()
+            self.section_props.beta_x_minus = (
+                int_x / self.section_props.ixx_c - 2 * self.section_props.y_se
+            )
+            self.section_props.beta_y_plus = (
+                -int_y / self.section_props.iyy_c + 2 * self.section_props.x_se
+            )
+            self.section_props.beta_y_minus = (
+                int_y / self.section_props.iyy_c - 2 * self.section_props.x_se
+            )
+            self.section_props.beta_11_plus = (
+                -int_11 / self.section_props.i11_c + 2 * self.section_props.y22_se
+            )
+            self.section_props.beta_11_minus = (
+                int_11 / self.section_props.i11_c - 2 * self.section_props.y22_se
+            )
+            self.section_props.beta_22_plus = (
+                -int_22 / self.section_props.i22_c + 2 * self.section_props.x11_se
+            )
+            self.section_props.beta_22_minus = (
+                int_22 / self.section_props.i22_c - 2 * self.section_props.x11_se
+            )
 
-        # calculate the monosymmetry constants
-        self.section_props.beta_x_plus = (
-            -int_x / self.section_props.ixx_c + 2 * self.section_props.y_se
-        )
-        self.section_props.beta_x_minus = (
-            int_x / self.section_props.ixx_c - 2 * self.section_props.y_se
-        )
-        self.section_props.beta_y_plus = (
-            -int_y / self.section_props.iyy_c + 2 * self.section_props.x_se
-        )
-        self.section_props.beta_y_minus = (
-            int_y / self.section_props.iyy_c - 2 * self.section_props.x_se
-        )
-        self.section_props.beta_11_plus = (
-            -int_11 / self.section_props.i11_c + 2 * self.section_props.y22_se
-        )
-        self.section_props.beta_11_minus = (
-            int_11 / self.section_props.i11_c - 2 * self.section_props.y22_se
-        )
-        self.section_props.beta_22_plus = (
-            -int_22 / self.section_props.i22_c + 2 * self.section_props.x11_se
-        )
-        self.section_props.beta_22_minus = (
-            int_22 / self.section_props.i22_c - 2 * self.section_props.x11_se
-        )
+        # conduct warping analysis
+        if self.time_info:
+            # create warping progress
+            progress = solver.create_progress()
+            total_task = progress.add_task(
+                description="[bold red]Conducting warping analysis...", total=7
+            )
+
+            progress_table = Table.grid()
+            panel = Panel.fit(
+                progress,
+                title="[bold]Warping Analysis",
+                border_style="red",
+                padding=(1, 1),
+            )
+            progress_table.add_row(panel)
+
+            with Live(progress_table, refresh_per_second=10) as live:
+                warping_analysis(progress)
+
+                progress.update(
+                    total_task,
+                    description="[bold green]:white_check_mark: Warping analysis completed",
+                )
+
+                panel.border_style = "green"
+                live.refresh()
+
+            print()
+        else:
+            warping_analysis()
 
     def calculate_frame_properties(self, solver_type="direct"):
         """Calculates and returns the properties required for a frame analysis. The properties are
@@ -684,105 +869,96 @@ class Section:
             (area, ixx, iyy, ixy, j, phi) = section.calculate_frame_properties()
         """
 
-        def calculate_frame():
-            # initialise geometric properties
-            self.section_props.area = 0
-            self.section_props.ea = 0
-            self.section_props.qx = 0
-            self.section_props.qy = 0
-            self.section_props.ixx_g = 0
-            self.section_props.iyy_g = 0
-            self.section_props.ixy_g = 0
-            self.section_props.ixx_c = 0
-            self.section_props.iyy_c = 0
-            self.section_props.ixy_c = 0
-            self.section_props.j = 0
+        # initialise geometric properties
+        self.section_props.area = 0
+        self.section_props.ea = 0
+        self.section_props.qx = 0
+        self.section_props.qy = 0
+        self.section_props.ixx_g = 0
+        self.section_props.iyy_g = 0
+        self.section_props.ixy_g = 0
+        self.section_props.ixx_c = 0
+        self.section_props.iyy_c = 0
+        self.section_props.ixy_c = 0
+        self.section_props.j = 0
+        self.section_props.phi = 0
+
+        # calculate global geometric properties
+        for el in self.elements:
+            (area, qx, qy, ixx_g, iyy_g, ixy_g, e, _, _) = el.geometric_properties()
+
+            self.section_props.area += area
+            self.section_props.ea += area * e
+            self.section_props.qx += qx * e
+            self.section_props.qy += qy * e
+            self.section_props.ixx_g += ixx_g * e
+            self.section_props.iyy_g += iyy_g * e
+            self.section_props.ixy_g += ixy_g * e
+
+        # calculate elastic centroid location
+        self.section_props.calculate_elastic_centroid()
+
+        # calculate second moments of area about the centroidal xy axis
+        self.section_props.ixx_c = (
+            self.section_props.ixx_g
+            - self.section_props.qx**2 / self.section_props.ea
+        )
+        self.section_props.iyy_c = (
+            self.section_props.iyy_g
+            - self.section_props.qy**2 / self.section_props.ea
+        )
+        self.section_props.ixy_c = (
+            self.section_props.ixy_g
+            - self.section_props.qx * self.section_props.qy / self.section_props.ea
+        )
+
+        # calculate the principal axis angle
+        Delta = (
+            ((self.section_props.ixx_c - self.section_props.iyy_c) / 2) ** 2
+            + self.section_props.ixy_c**2
+        ) ** 0.5
+
+        i11_c = (self.section_props.ixx_c + self.section_props.iyy_c) / 2 + Delta
+
+        # calculate initial principal axis angle
+        if abs(self.section_props.ixx_c - i11_c) < 1e-12 * i11_c:
             self.section_props.phi = 0
-
-            # calculate global geometric properties
-            for el in self.elements:
-                (area, qx, qy, ixx_g, iyy_g, ixy_g, e, _, _) = el.geometric_properties()
-
-                self.section_props.area += area
-                self.section_props.ea += area * e
-                self.section_props.qx += qx * e
-                self.section_props.qy += qy * e
-                self.section_props.ixx_g += ixx_g * e
-                self.section_props.iyy_g += iyy_g * e
-                self.section_props.ixy_g += ixy_g * e
-
-            # calculate elastic centroid location
-            self.section_props.calculate_elastic_centroid()
-
-            # calculate second moments of area about the centroidal xy axis
-            self.section_props.ixx_c = (
-                self.section_props.ixx_g
-                - self.section_props.qx**2 / self.section_props.ea
-            )
-            self.section_props.iyy_c = (
-                self.section_props.iyy_g
-                - self.section_props.qy**2 / self.section_props.ea
-            )
-            self.section_props.ixy_c = (
-                self.section_props.ixy_g
-                - self.section_props.qx * self.section_props.qy / self.section_props.ea
-            )
-
-            # calculate the principal axis angle
-            Delta = (
-                ((self.section_props.ixx_c - self.section_props.iyy_c) / 2) ** 2
-                + self.section_props.ixy_c**2
-            ) ** 0.5
-
-            i11_c = (self.section_props.ixx_c + self.section_props.iyy_c) / 2 + Delta
-
-            # calculate initial principal axis angle
-            if abs(self.section_props.ixx_c - i11_c) < 1e-12 * i11_c:
-                self.section_props.phi = 0
-            else:
-                self.section_props.phi = (
-                    np.arctan2(
-                        self.section_props.ixx_c - i11_c, self.section_props.ixy_c
-                    )
-                    * 180
-                    / np.pi
-                )
-
-            # create a new Section with the origin shifted to the centroid for calculation of
-            # the warping properties
-            warping_section = Section(self.geometry, self.time_info)
-
-            # shift the coordinates of each element N.B. the mesh class attribute remains unshifted
-            for el in warping_section.elements:
-                el.coords[0, :] -= self.section_props.cx
-                el.coords[1, :] -= self.section_props.cy
-
-            (k, _, f) = warping_section.assemble_torsion(lg=False)
-
-            # if the cgs method is used, perform ILU decomposition
-            if solver_type == "cgs":
-                k_precond = linalg.LinearOperator(
-                    (self.num_nodes, self.num_nodes), linalg.spilu(k).solve
-                )
-
-            # solve for warping function
-            if solver_type == "cgs":
-                omega = solver.solve_cgs(k, f, k_precond)
-            elif solver_type == "direct":
-                omega = solver.solve_direct(k, f)
-
-            # calculate the torsion constant
-            self.section_props.j = (
-                self.section_props.ixx_c
-                + self.section_props.iyy_c
-                - omega.dot(k.dot(np.transpose(omega)))
-            )
-
-        if self.time_info:
-            text = "--Calculating frame section properties..."
-            solver.function_timer(text, calculate_frame)
         else:
-            calculate_frame()
+            self.section_props.phi = (
+                np.arctan2(self.section_props.ixx_c - i11_c, self.section_props.ixy_c)
+                * 180
+                / np.pi
+            )
+
+        # create a new Section with the origin shifted to the centroid for calculation of
+        # the warping properties
+        warping_section = Section(self.geometry)
+
+        # shift the coordinates of each element N.B. the mesh class attribute remains unshifted
+        for el in warping_section.elements:
+            el.coords[0, :] -= self.section_props.cx
+            el.coords[1, :] -= self.section_props.cy
+
+        (k_lg, f) = warping_section.assemble_torsion()
+
+        # if the cgs method is used, perform ILU decomposition
+        if solver_type == "cgs":
+            k_lg_precond = linalg.LinearOperator(
+                (self.num_nodes + 1, self.num_nodes + 1), linalg.spilu(k_lg).solve
+            )
+
+        # solve for warping function
+        if solver_type == "cgs":
+            omega = solver.solve_cgs_lagrange(k_lg, f, m=k_lg_precond)
+        elif solver_type == "direct":
+            omega = solver.solve_direct_lagrange(k_lg, f)
+
+        # calculate the torsion constant
+        self.section_props.j = (
+            self.section_props.ixx_c
+            + self.section_props.iyy_c
+            - omega.dot(k_lg[:-1, :-1].dot(np.transpose(omega)))
+        )
 
         return (
             self.section_props.ea,
@@ -793,15 +969,13 @@ class Section:
             self.section_props.phi,
         )
 
-    def calculate_plastic_properties(self, verbose=False, debug=False):
+    def calculate_plastic_properties(self, verbose=False):
         """Calculates the plastic properties of the cross-section and stores them in the
         :class:`~sectionproperties.analysis.section.SectionProperties` object contained in
         the ``section_props`` class variable.
 
         :param bool verbose: If set to True, the number of iterations required for each plastic
             axis is printed to the terminal.
-        :param bool debug: If set to True, the geometry is plotted each time a new mesh is
-            generated by the plastic centroid algorithm.
 
         The following warping section properties are calculated:
 
@@ -841,19 +1015,34 @@ class Section:
                     "information."
                 )
 
-        def calc_plastic():
+        def calc_plastic(progress=None):
             plastic_section = PlasticSection(self.geometry)
-            plastic_section.calculate_plastic_properties(self, verbose)
+            plastic_section.calculate_plastic_properties(self, verbose, progress)
 
         if self.time_info:
-            text = "--Calculating plastic properties..."
-            solver.function_timer(text, calc_plastic)
+            progress = solver.create_progress()
+
+            progress_table = Table.grid()
+            panel = Panel.fit(
+                progress,
+                title="[bold]Plastic Analysis",
+                border_style="red",
+                padding=(1, 1),
+            )
+            progress_table.add_row(panel)
+
+            with Live(progress_table, refresh_per_second=10) as live:
+                calc_plastic(progress=progress)
+                panel.border_style = "green"
+                live.refresh()
+
+            print()
         else:
             calc_plastic()
 
     def calculate_stress(self, N=0, Vx=0, Vy=0, Mxx=0, Myy=0, M11=0, M22=0, Mzz=0):
-        """Calculates the cross-section stress resulting from design actions and returns a
-        :class:`~sectionproperties.analysis.section.StressPost` object allowing
+        """Calculates the cross-section stress resulting from design actions and returns
+        a :class:`~sectionproperties.analysis.section.StressPost` object allowing
         post-processing of the stress results.
 
         :param float N: Axial force
@@ -864,36 +1053,44 @@ class Section:
         :param float M11: Bending moment about the centroidal 11-axis
         :param float M22: Bending moment about the centroidal 22-axis
         :param float Mzz: Torsion moment about the centroidal zz-axis
+
         :return: Object for post-processing cross-section stresses
         :rtype: :class:`~sectionproperties.analysis.section.StressPost`
 
-        Note that a geometric and warping analysis must be performed before a stress analysis is
-        carried out::
+        Note that a geometric analysis must be performed prior to performing a stress
+        analysis. Further, if the shear force or torsion is non-zero a warping analysis
+        must also be performed::
 
             section = Section(geometry)
             section.calculate_geometric_properties()
             section.calculate_warping_properties()
             stress_post = section.calculate_stress(N=1e3, Vy=3e3, Mxx=1e6)
 
-        :raises RuntimeError: If a geometric and warping analysis have not been performed prior to
-            calling this method
+        :raises RuntimeError: If a geometric and warping analysis (if required) have not
+            been performed prior to calling this method
         """
 
         # check that a geometric and warping analysis has been performed
-        if (
-            None
-            in [
-                self.section_props.area,
-                self.section_props.ixx_c,
-                self.section_props.cx,
-                self.section_props.j,
-            ]
-            and self.section_props.omega is None
-        ):
-            err = "Perform a geometric and warping analysis before carrying out a stress analysis."
+        if None in [
+            self.section_props.area,
+            self.section_props.ixx_c,
+            self.section_props.cx,
+        ]:
+            err = "Perform a geometric analysis before carrying out a stress analysis."
             raise RuntimeError(err)
 
-        def calc_stress():
+        if self.section_props.omega is None and (Vx != 0 or Vy != 0 or Mzz != 0):
+            err = "Perform a warping analysis before carrying out a stress analysis "
+            err += "with non-zero shear forces or torsion moment."
+            raise RuntimeError(err)
+
+        def calc_stress(progress=None):
+            if progress is not None:
+                task = progress.add_task(
+                    description="[red]Calculating cross-section stresses",
+                    total=len(self.elements),
+                )
+
             # create stress post object
             stress_post = StressPost(self)
 
@@ -918,6 +1115,16 @@ class Section:
 
                 # loop through all elements in the material group
                 for el in group.elements:
+                    # get element omega and psi
+                    if self.section_props.omega is None:
+                        omega_el = None
+                        psi_shear_el = None
+                        phi_shear_el = None
+                    else:
+                        omega_el = self.section_props.omega[el.node_ids]
+                        psi_shear_el = self.section_props.psi_shear[el.node_ids]
+                        phi_shear_el = self.section_props.phi_shear[el.node_ids]
+
                     (
                         sig_zz_n_el,
                         sig_zz_mxx_el,
@@ -951,9 +1158,9 @@ class Section:
                         phi,
                         j,
                         nu,
-                        self.section_props.omega[el.node_ids],
-                        self.section_props.psi_shear[el.node_ids],
-                        self.section_props.phi_shear[el.node_ids],
+                        omega_el,
+                        psi_shear_el,
+                        phi_shear_el,
                         Delta_s,
                     )
 
@@ -985,6 +1192,9 @@ class Section:
                     # add nodal weights
                     nodal_weights[el.node_ids] += weights
 
+                    if progress is not None:
+                        progress.update(task, advance=1)
+
                 # nodal averaging
                 for (i, weight) in enumerate(nodal_weights):
                     if weight != 0:
@@ -1003,29 +1213,47 @@ class Section:
                 # calculate combined stresses
                 group.stress_result.calculate_combined_stresses()
 
+            if progress is not None:
+                progress.update(
+                    task,
+                    description="[bold green]:white_check_mark: Stress analysis complete",
+                )
+
             return stress_post
 
         if self.time_info:
-            text = "--Calculating cross-section stresses..."
-            stress_post = solver.function_timer(text, calc_stress)
+            progress = solver.create_progress()
+
+            progress_table = Table.grid()
+            panel = Panel.fit(
+                progress,
+                title="[bold]Stress Analysis",
+                border_style="red",
+                padding=(1, 1),
+            )
+            progress_table.add_row(panel)
+
+            with Live(progress_table, refresh_per_second=10) as live:
+                stress_post = calc_stress(progress=progress)
+                panel.border_style = "green"
+                live.refresh()
+
+            print()
         else:
             stress_post = calc_stress()
 
         # return the stress_post object
         return stress_post
 
-    def assemble_torsion(self, lg=True):
-        """Assembles stiffness matrices to be used for the computation of warping properties and
-        the torsion load vector (f_torsion). Both a regular (k) and Lagrangian multiplier (k_lg)
-        stiffness matrix are returned. The stiffness matrices are assembled using the sparse COO
-        format and returned in the sparse CSC format.
+    def assemble_torsion(self, progress=None, task=None):
+        """Assembles stiffness matrices to be used for the computation of warping
+        properties and the torsion load vector (f_torsion). A Lagrangian multiplier
+        (k_lg) stiffness matrix is returned. The stiffness matrix are assembled using
+        the sparse COO format and returned in the sparse CSC format.
 
-        :param bool lg: Whether or not to calculate the Lagrangian multiplier stiffness matrix
-
-        :return: Regular stiffness matrix, Lagrangian multiplier stiffness matrix and torsion load
-            vector *(k, k_lg, f_torsion)*
-        :rtype: tuple(:class:`scipy.sparse.csc_matrix`, :class:`scipy.sparse.csc_matrix`,
-            :class:`numpy.ndarray`)
+        :return: Lagrangian multiplier stiffness matrix and torsion load
+            vector *(k_lg, f_torsion)*
+        :rtype: tuple(:class:`scipy.sparse.csc_matrix`, :class:`numpy.ndarray`)
         """
 
         # initialise variables
@@ -1060,10 +1288,8 @@ class Section:
             col = np.hstack((col, c))
             data = np.hstack((data, k))
 
-        k = coo_matrix((data, (row, col)), shape=(N, N))
-
-        if not lg:
-            return (csc_matrix(k), None, f_torsion)
+            if progress is not None:
+                progress.update(task, advance=1)
 
         # construct Lagrangian multiplier matrix:
         # column vector of ones
@@ -1083,7 +1309,7 @@ class Section:
 
         k_lg = coo_matrix((data, (row, col)), shape=(N + 1, N + 1))
 
-        return (csc_matrix(k), csc_matrix(k_lg), f_torsion)
+        return (csc_matrix(k_lg), f_torsion)
 
     def plot_mesh(
         self,
@@ -1101,7 +1327,7 @@ class Section:
         :param mask: Mask array, of length ``num_nodes``, to mask out triangles
         :type mask: list[bool]
         :param string title: Plot title
-        :param \**kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
+        :param kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
 
         :return: Matplotlib axes object
         :rtype: :class:`matplotlib.axes`
@@ -1196,7 +1422,7 @@ class Section:
         axis, if they have been calculated, on top of the finite element mesh.
 
         :param string title: Plot title
-        :param \**kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
+        :param kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
 
         :return: Matplotlib axes object
         :rtype: :class:`matplotlib.axes`
@@ -1332,19 +1558,20 @@ class Section:
             >>>--2 regions
         """
 
-        print("Mesh Statistics:")
-        print("--{0} nodes".format(self.num_nodes))
-        print("--{0} elements".format(len(self.elements)))
+        console = Console()
+
+        console.print("Mesh Statistics:", style="bold underline magenta")
+        console.print(f"- {self.num_nodes} nodes")
+        console.print(f"- {len(self.elements)} elements")
 
         regions = max(self.mesh_attributes) + 1
-        text = "--{0} region".format(regions)
+        text = f"- {regions} region"
 
-        if regions == 1:
-            text += "\n"
-        else:
-            text += "s\n"
+        if regions > 1:
+            text += "s"
 
-        print(text)
+        console.print(text)
+        console.print()
 
     def display_results(self, fmt="8.6e"):
         """Prints the results that have been calculated to the terminal.
@@ -1921,6 +2148,170 @@ class Section:
             self.section_props.sf_22_minus,
         )
 
+    def get_stress_at_point(
+        self,
+        pt: List[float],
+        N=0,
+        Mxx=0,
+        Myy=0,
+        M11=0,
+        M22=0,
+        Mzz=0,
+        Vx=0,
+        Vy=0,
+        agg_func=np.average,
+    ) -> Tuple[float]:
+        """Calculates the stress at a point within an element for given design actions
+        and returns *(sigma_zz, tau_xz, tau_yz)*
+
+        :param pt: The point. A list of the x and y coordinate
+        :type pt: list[float, float]
+        :param float N: Axial force
+        :param float Vx: Shear force acting in the x-direction
+        :param float Vy: Shear force acting in the y-direction
+        :param float Mxx: Bending moment about the centroidal xx-axis
+        :param float Myy: Bending moment about the centroidal yy-axis
+        :param float M11: Bending moment about the centroidal 11-axis
+        :param float M22: Bending moment about the centroidal 22-axis
+        :param float Mzz: Torsion moment about the centroidal zz-axis
+        :param agg_function: A function that aggregates the stresses if the point is shared by several elements.
+            If the point, pt, is shared by several elements (e.g. if it is a node or on an edge), the stress
+            (sigma_zz, tau_xz, tau_yz) are retrieved from each element and combined according to this function.
+            By default, `numpy.average` is used.
+        :type agg_function: function, optional
+        :return: Resultant normal and shear stresses list[(sigma_zz, tau_xz, tau_yz)]. If a point it not in the
+            section then None is returned.
+        :rtype: Union[Tuple[float, float, float], None]
+        """
+        sigs = self.get_stress_at_points(
+            [pt], N, Mxx, Myy, M11, M22, Mzz, Vx, Vy, agg_func
+        )
+        return next(sigs)
+
+    def get_stress_at_points(
+        self,
+        pts: List[List[float]],
+        N=0,
+        Mxx=0,
+        Myy=0,
+        M11=0,
+        M22=0,
+        Mzz=0,
+        Vx=0,
+        Vy=0,
+        agg_func=np.average,
+    ) -> List[Tuple]:
+        """Calculates the stress at a set of points within an element for given design actions
+        and returns *(sigma_zz, tau_xz, tau_yz)*
+
+        :param pts: The points. A list of several x and y coordinates
+        :type pts: list[list[float, float]]
+        :param float N: Axial force
+        :param float Vx: Shear force acting in the x-direction
+        :param float Vy: Shear force acting in the y-direction
+        :param float Mxx: Bending moment about the centroidal xx-axis
+        :param float Myy: Bending moment about the centroidal yy-axis
+        :param float M11: Bending moment about the centroidal 11-axis
+        :param float M22: Bending moment about the centroidal 22-axis
+        :param float Mzz: Torsion moment about the centroidal zz-axis
+        :param agg_function: A function that aggregates the stresses if the point is shared by several elements.
+            If the point, pt, is shared by several elements (e.g. if it is a node or on an edge), the stress
+            (sigma_zz, tau_xz, tau_yz) are retrieved from each element and combined according to this function.
+            By default, `numpy.average` is used.
+        :type agg_function: function, optional
+        :return: Resultant normal and shear stresses list[(sigma_zz, tau_xz, tau_yz)]. If a point it not in the
+            section then None is returned for that element in the list.
+        :rtype: List[Union[Tuple[float, float, float], None]]
+        """
+
+        # ensure warping analysis completed for shear and torsion
+        if self.section_props.omega is None and (Vx != 0 or Vy != 0 or Mzz != 0):
+            err = "Perform a warping analysis before carrying out a stress analysis "
+            err += "with non-zero shear forces or torsion moment."
+            raise RuntimeError(err)
+
+        action = {
+            "N": N,
+            "Mxx": Mxx,
+            "Myy": Myy,
+            "M11": M11,
+            "M22": M22,
+            "Mzz": Mzz,
+            "Vx": Vx,
+            "Vy": Vy,
+        }
+
+        sect_prop = {
+            "ea": self.section_props.ea,
+            "cx": self.section_props.cx,
+            "cy": self.section_props.cy,
+            "ixx": self.section_props.ixx_c,
+            "iyy": self.section_props.iyy_c,
+            "ixy": self.section_props.ixy_c,
+            "i11": self.section_props.i11_c,
+            "i22": self.section_props.i22_c,
+            "phi": self.section_props.phi,
+            "j": self.section_props.j,
+            "Delta_s": self.section_props.Delta_s,
+            "nu": self.section_props.nu_eff,
+        }
+
+        for pt in pts:
+            query_geom = Point(pt)
+            tri_ids = self.mesh_search_tree.query(query_geom, predicate="intersects")
+            if len(tri_ids) == 0:
+                sig = None
+            elif len(tri_ids) == 1:
+                tri = self.elements[tri_ids[0]]
+
+                if self.section_props.omega is None:
+                    omega_el = None
+                    psi_shear_el = None
+                    phi_shear_el = None
+                else:
+                    omega_el = self.section_props.omega[tri.node_ids]
+                    psi_shear_el = self.section_props.psi_shear[tri.node_ids]
+                    phi_shear_el = self.section_props.phi_shear[tri.node_ids]
+
+                sig = tri.local_element_stress(
+                    p=pt,
+                    **action,
+                    **sect_prop,
+                    omega=omega_el,
+                    psi_shear=psi_shear_el,
+                    phi_shear=phi_shear_el,
+                )
+            else:
+                sigs = []
+                for idx in tri_ids:
+                    tri = self.elements[idx]
+
+                    if self.section_props.omega is None:
+                        omega_el = None
+                        psi_shear_el = None
+                        phi_shear_el = None
+                    else:
+                        omega_el = self.section_props.omega[tri.node_ids]
+                        psi_shear_el = self.section_props.psi_shear[tri.node_ids]
+                        phi_shear_el = self.section_props.phi_shear[tri.node_ids]
+
+                    sigs.append(
+                        tri.local_element_stress(
+                            p=pt,
+                            **action,
+                            **sect_prop,
+                            omega=omega_el,
+                            psi_shear=psi_shear_el,
+                            phi_shear=phi_shear_el,
+                        )
+                    )
+                sig = (
+                    agg_func([sig[0] for sig in sigs]),
+                    agg_func([sig[1] for sig in sigs]),
+                    agg_func([sig[2] for sig in sigs]),
+                )
+            yield sig
+
 
 class PlasticSection:
     """Class for the plastic analysis of cross-sections.
@@ -1931,16 +2322,11 @@ class PlasticSection:
     :param section: Section object
     :type section: :class:`~sectionproperties.analysis.section.Section`
 
-    :param bool debug: If set to True, the geometry is plotted each time a new mesh is generated by
-        the plastic centroid algorithm.
-
     :cvar geometry: Deep copy of the Section geometry object provided to the constructor
     :vartype geometry: :class:`~sectionproperties.pre.geometry.Geometry`
     :cvar materials: A list of material properties corresponding to various regions in the geometry
         and mesh.
     :vartype materials: list[:class:`~sectionproperties.pre.pre.Material`]
-    :cvar bool debug: If set to True, the geometry is plotted each time a new mesh is generated by
-        the plastic centroid algorithm.
     :cvar mesh: Mesh dict returned by triangle
     :vartype mesh: dict(mesh)
     :cvar mesh_nodes: Array of node coordinates from the mesh
@@ -2006,7 +2392,7 @@ class PlasticSection:
 
         return (qy / ea, qx, ea)
 
-    def calculate_plastic_properties(self, section, verbose):
+    def calculate_plastic_properties(self, section, verbose, progress=None):
         """Calculates the location of the plastic centroid with respect to the centroidal and
         principal bending axes, the plastic section moduli and shape factors and stores the results
         to the supplied :class:`~sectionproperties.analysis.section.Section` object.
@@ -2017,6 +2403,12 @@ class PlasticSection:
         :param bool verbose: If set to True, the number of iterations required for each plastic
             axis is printed to the terminal.
         """
+
+        if progress is not None:
+            task = progress.add_task(
+                description="[red]Calculating plastic properties",
+                total=4,
+            )
 
         # 1) Calculate plastic properties for centroidal axis
         # calculate distances to the extreme fibres
@@ -2036,6 +2428,9 @@ class PlasticSection:
         if verbose:
             self.print_verbose(y_pc, r, "x-axis")  # Location of axis for each iteration
 
+        if progress is not None:
+            progress.update(task, advance=1)
+
         # 1b) Calculate y-axis plastic centroid
         (x_pc, r, f, c_top, c_bot) = self.pc_algorithm(
             np.array([0, 1]), fibres[0:2], 2, verbose
@@ -2047,6 +2442,9 @@ class PlasticSection:
 
         if verbose:
             self.print_verbose(x_pc, r, "y-axis")  # Location of axis for each iteration
+
+        if progress is not None:
+            progress.update(task, advance=1)
 
         # 2) Calculate plastic properties for principal axis
         # convert principal axis angle to radians
@@ -2079,6 +2477,9 @@ class PlasticSection:
         if verbose:
             self.print_verbose(y22_pc, r, "11-axis")
 
+        if progress is not None:
+            progress.update(task, advance=1)
+
         # 2b) Calculate 22-axis plastic centroid
         (x11_pc, r, f, c_top, c_bot) = self.pc_algorithm(
             uy, fibres[0:2], 2, verbose
@@ -2098,6 +2499,9 @@ class PlasticSection:
 
         if verbose:
             self.print_verbose(x11_pc, r, "22-axis")
+
+        if progress is not None:
+            progress.update(task, advance=1)
 
         # if there are no materials specified, calculate shape factors
         if list(set(section.materials)) == [pre.DEFAULT_MATERIAL]:
@@ -2125,6 +2529,12 @@ class PlasticSection:
             )
             section.section_props.sf_22_minus = (
                 section.section_props.s22 / section.section_props.z22_minus
+            )
+
+        if progress is not None:
+            progress.update(
+                task,
+                description="[bold green]:white_check_mark: Plastic analysis complete",
             )
 
     def check_convergence(self, root_result, axis):
@@ -2281,7 +2691,7 @@ class PlasticSection:
         """
         # initialise variables
         (f_top, f_bot) = (0, 0)
-        (ea_top, ea_bot) = (0, 0)
+        (a_top, a_bot) = (0, 0)
         (qx_top, qx_bot) = (0, 0)
         (qy_top, qy_bot) = (0, 0)
 
@@ -2292,7 +2702,7 @@ class PlasticSection:
                 e = top_geom.material.elastic_modulus
                 f_y = top_geom.material.yield_strength
                 area_top = top_geom.calculate_area()
-                ea_top += e * area_top
+                a_top += area_top
                 cx, cy = top_geom.calculate_centroid()
                 qx_top += cy * area_top
                 qy_top += cx * area_top
@@ -2303,21 +2713,21 @@ class PlasticSection:
                 e = bot_geom.material.elastic_modulus
                 f_y = bot_geom.material.yield_strength
                 area_bot = bot_geom.calculate_area()
-                ea_bot += e * area_bot
+                a_bot += area_bot
                 cx, cy = bot_geom.calculate_centroid()
                 qx_bot += cy * area_bot
                 qy_bot += cx * area_bot
                 f_bot += f_y * area_bot
 
         try:
-            self.c_top = [qy_top / ea_top, qx_top / ea_top]
+            self.c_top = [qy_top / a_top, qx_top / a_top]
             self.f_top = f_top
         except ZeroDivisionError:
             self.c_top = [0, 0]
             self.f_top = 0
 
         try:
-            self.c_bot = [qy_bot / ea_bot, qx_bot / ea_bot]
+            self.c_bot = [qy_bot / a_bot, qx_bot / a_bot]
         except ZeroDivisionError:
             self.c_bot = [0, 0]
 
@@ -2360,7 +2770,7 @@ class StressPost:
         :param string cmap: Matplotlib color map.
         :param bool normalize: If set to true, the CenteredNorm is used to scale the colormap.
             If set to false, the default linear scaling is used.
-        :param \**kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
+        :param kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
 
         :return: Matplotlib axe object
         :rtype: :class:`matplotlib.axes`
@@ -2426,7 +2836,7 @@ class StressPost:
         :param string cmap: Matplotlib color map.
         :param bool normalize: If set to true, the CenteredNorm is used to scale the colormap.
             If set to false, the default linear scaling is used.
-        :param \**kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
+        :param kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
 
         :return: Matplotlib axes object
         :rtype: :class:`matplotlib.axes`
@@ -2640,7 +3050,7 @@ class StressPost:
         :param string cmap: Matplotlib color map.
         :param bool normalize: If set to true, the CenteredNorm is used to scale the colormap.
             If set to false, the default linear scaling is used.
-        :param \**kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
+        :param kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
 
         :return: Matplotlib axes object
         :rtype: :class:`matplotlib.axes`
@@ -2689,7 +3099,7 @@ class StressPost:
         :param string cmap: Matplotlib color map.
         :param bool normalize: If set to true, the CenteredNorm is used to scale the colormap.
             If set to false, the default linear scaling is used.
-        :param \**kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
+        :param kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
 
         :return: Matplotlib axes object
         :rtype: :class:`matplotlib.axes`
@@ -2738,7 +3148,7 @@ class StressPost:
         :param string cmap: Matplotlib color map.
         :param bool normalize: If set to true, the CenteredNorm is used to scale the colormap.
             If set to false, the default linear scaling is used.
-        :param \**kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
+        :param kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
 
         :return: Matplotlib axes object
         :rtype: :class:`matplotlib.axes`
@@ -2787,7 +3197,7 @@ class StressPost:
         :param string cmap: Matplotlib color map.
         :param bool normalize: If set to true, the CenteredNorm is used to scale the colormap.
             If set to false, the default linear scaling is used.
-        :param \**kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
+        :param kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
 
         :return: Matplotlib axes object
         :rtype: :class:`matplotlib.axes`
@@ -2836,7 +3246,7 @@ class StressPost:
         :param string cmap: Matplotlib color map.
         :param bool normalize: If set to true, the CenteredNorm is used to scale the colormap.
             If set to false, the default linear scaling is used.
-        :param \**kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
+        :param kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
 
         :return: Matplotlib axes object
         :rtype: :class:`matplotlib.axes`
@@ -2885,7 +3295,7 @@ class StressPost:
         :param string cmap: Matplotlib color map.
         :param bool normalize: If set to true, the CenteredNorm is used to scale the colormap.
             If set to false, the default linear scaling is used.
-        :param \**kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
+        :param kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
 
         :return: Matplotlib axes object
         :rtype: :class:`matplotlib.axes`
@@ -2935,7 +3345,7 @@ class StressPost:
         :param string cmap: Matplotlib color map.
         :param bool normalize: If set to true, the CenteredNorm is used to scale the colormap.
             If set to false, the default linear scaling is used.
-        :param \**kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
+        :param kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
 
         :return: Matplotlib axes object
         :rtype: :class:`matplotlib.axes`
@@ -2984,7 +3394,7 @@ class StressPost:
         :param string cmap: Matplotlib color map.
         :param bool normalize: If set to true, the CenteredNorm is used to scale the colormap.
             If set to false, the default linear scaling is used.
-        :param \**kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
+        :param kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
 
         :return: Matplotlib axes object
         :rtype: :class:`matplotlib.axes`
@@ -3033,7 +3443,7 @@ class StressPost:
         :param string cmap: Matplotlib color map.
         :param bool normalize: If set to true, the CenteredNorm is used to scale the colormap.
             If set to false, the default linear scaling is used.
-        :param \**kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
+        :param kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
 
         :return: Matplotlib axes object
         :rtype: :class:`matplotlib.axes`
@@ -3082,7 +3492,7 @@ class StressPost:
         :param string cmap: Matplotlib color map.
         :param bool normalize: If set to true, the CenteredNorm is used to scale the colormap.
             If set to false, the default linear scaling is used.
-        :param \**kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
+        :param kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
 
         :return: Matplotlib axes object
         :rtype: :class:`matplotlib.axes`
@@ -3133,7 +3543,7 @@ class StressPost:
         :param string cmap: Matplotlib color map.
         :param bool normalize: If set to true, the CenteredNorm is used to scale the colormap.
             If set to false, the default linear scaling is used.
-        :param \**kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
+        :param kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
 
         :return: Matplotlib axes object
         :rtype: :class:`matplotlib.axes`
@@ -3182,7 +3592,7 @@ class StressPost:
         :param string cmap: Matplotlib color map.
         :param bool normalize: If set to true, the CenteredNorm is used to scale the colormap.
             If set to false, the default linear scaling is used.
-        :param \**kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
+        :param kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
 
         :return: Matplotlib axes object
         :rtype: :class:`matplotlib.axes`
@@ -3219,7 +3629,7 @@ class StressPost:
 
     def plot_stress_vx_zxy(
         self,
-        title=r"Stress Contour Plot - $\sigma_{zz,Myy}$",
+        title=r"Stress Contour Plot - $\sigma_{zxy,Vx}$",
         cmap="coolwarm",
         normalize=True,
         **kwargs,
@@ -3231,7 +3641,7 @@ class StressPost:
         :param string cmap: Matplotlib color map.
         :param bool normalize: If set to true, the CenteredNorm is used to scale the colormap.
             If set to false, the default linear scaling is used.
-        :param \**kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
+        :param kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
 
         :return: Matplotlib axes object
         :rtype: :class:`matplotlib.axes`
@@ -3259,7 +3669,6 @@ class StressPost:
             Contour plot of the shear stress.
         """
 
-        title = r"Stress Contour Plot - $\sigma_{zxy,Vx}$"
         sigs = []
 
         for group in self.material_groups:
@@ -3281,7 +3690,7 @@ class StressPost:
         :param string cmap: Matplotlib color map.
         :param bool normalize: If set to true, the CenteredNorm is used to scale the colormap.
             If set to false, the default linear scaling is used.
-        :param \**kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
+        :param kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
 
         :return: Matplotlib axes object
         :rtype: :class:`matplotlib.axes`
@@ -3332,7 +3741,7 @@ class StressPost:
         :param string cmap: Matplotlib color map.
         :param bool normalize: If set to true, the CenteredNorm is used to scale the colormap.
             If set to false, the default linear scaling is used.
-        :param \**kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
+        :param kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
 
         :return: Matplotlib axes object
         :rtype: :class:`matplotlib.axes`
@@ -3381,7 +3790,7 @@ class StressPost:
         :param string cmap: Matplotlib color map.
         :param bool normalize: If set to true, the CenteredNorm is used to scale the colormap.
             If set to false, the default linear scaling is used.
-        :param \**kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
+        :param kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
 
         :return: Matplotlib axes object
         :rtype: :class:`matplotlib.axes`
@@ -3430,7 +3839,7 @@ class StressPost:
         :param string cmap: Matplotlib color map.
         :param bool normalize: If set to true, the CenteredNorm is used to scale the colormap.
             If set to false, the default linear scaling is used.
-        :param \**kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
+        :param kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
 
         :return: Matplotlib axes object
         :rtype: :class:`matplotlib.axes`
@@ -3479,7 +3888,7 @@ class StressPost:
         :param string cmap: Matplotlib color map.
         :param bool normalize: If set to true, the CenteredNorm is used to scale the colormap.
             If set to false, the default linear scaling is used.
-        :param \**kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
+        :param kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
 
         :return: Matplotlib axes object
         :rtype: :class:`matplotlib.axes`
@@ -3531,7 +3940,7 @@ class StressPost:
         :param string cmap: Matplotlib color map.
         :param bool normalize: If set to true, the CenteredNorm is used to scale the colormap.
             If set to false, the default linear scaling is used.
-        :param \**kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
+        :param kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
 
         :return: Matplotlib axes object
         :rtype: :class:`matplotlib.axes`
@@ -3582,7 +3991,7 @@ class StressPost:
         :param string cmap: Matplotlib color map.
         :param bool normalize: If set to true, the CenteredNorm is used to scale the colormap.
             If set to false, the default linear scaling is used.
-        :param \**kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
+        :param kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
 
         :return: Matplotlib axes object
         :rtype: :class:`matplotlib.axes`
@@ -3633,7 +4042,7 @@ class StressPost:
         :param string cmap: Matplotlib color map.
         :param bool normalize: If set to true, the CenteredNorm is used to scale the colormap.
             If set to false, the default linear scaling is used.
-        :param \**kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
+        :param kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
 
         :return: Matplotlib axes object
         :rtype: :class:`matplotlib.axes`
@@ -3684,7 +4093,7 @@ class StressPost:
         :param string cmap: Matplotlib color map.
         :param bool normalize: If set to true, the CenteredNorm is used to scale the colormap.
             If set to false, the default linear scaling is used.
-        :param \**kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
+        :param kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
 
         :return: Matplotlib axes object
         :rtype: :class:`matplotlib.axes`
@@ -3736,7 +4145,7 @@ class StressPost:
         :param string cmap: Matplotlib color map.
         :param bool normalize: If set to true, the CenteredNorm is used to scale the colormap.
             If set to false, the default linear scaling is used.
-        :param \**kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
+        :param kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
 
         :return: Matplotlib axes object
         :rtype: :class:`matplotlib.axes`
@@ -3786,7 +4195,7 @@ class StressPost:
         :param string cmap: Matplotlib color map.
         :param bool normalize: If set to true, the CenteredNorm is used to scale the colormap.
             If set to false, the default linear scaling is used.
-        :param \**kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
+        :param kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
 
         :return: Matplotlib axes object
         :rtype: :class:`matplotlib.axes`
@@ -3836,7 +4245,7 @@ class StressPost:
         :param string cmap: Matplotlib color map.
         :param bool normalize: If set to true, the CenteredNorm is used to scale the colormap.
             If set to false, the default linear scaling is used.
-        :param \**kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
+        :param kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
 
         :return: Matplotlib axes object
         :rtype: :class:`matplotlib.axes`
@@ -3886,7 +4295,7 @@ class StressPost:
         :param string cmap: Matplotlib color map.
         :param bool normalize: If set to true, the CenteredNorm is used to scale the colormap.
             If set to false, the default linear scaling is used.
-        :param \**kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
+        :param kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
 
         :return: Matplotlib axes object
         :rtype: :class:`matplotlib.axes`
@@ -3936,7 +4345,7 @@ class StressPost:
         :param string cmap: Matplotlib color map.
         :param bool normalize: If set to true, the CenteredNorm is used to scale the colormap.
             If set to false, the default linear scaling is used.
-        :param \**kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
+        :param kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
 
         :return: Matplotlib axes object
         :rtype: :class:`matplotlib.axes`
@@ -3988,7 +4397,7 @@ class StressPost:
         :param string cmap: Matplotlib color map.
         :param bool normalize: If set to true, the CenteredNorm is used to scale the colormap.
             If set to false, the default linear scaling is used.
-        :param \**kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
+        :param kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
 
         :return: Matplotlib axes object
         :rtype: :class:`matplotlib.axes`
@@ -4048,7 +4457,7 @@ class StressPost:
         :param string cmap: Matplotlib color map.
         :param bool normalize: If set to true, the CenteredNorm is used to scale the colormap.
             If set to false, the default linear scaling is used.
-        :param \**kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
+        :param kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
 
         :return: Matplotlib axes object
         :rtype: :class:`matplotlib.axes`
@@ -4108,7 +4517,7 @@ class StressPost:
         :param string cmap: Matplotlib color map.
         :param bool normalize: If set to true, the CenteredNorm is used to scale the colormap.
             If set to false, the default linear scaling is used.
-        :param \**kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
+        :param kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
 
         :return: Matplotlib axes object
         :rtype: :class:`matplotlib.axes`
@@ -4160,7 +4569,7 @@ class StressPost:
         :param float x: x-coordinate of the point to draw Mohr's Circle
         :param float y: y-coordinate of the point to draw Mohr's Circle
         :param string title: Plot title
-        :param \**kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
+        :param kwargs: Passed to :func:`~sectionproperties.post.post.plotting_context`
 
         :return: Matplotlib axes object
         :rtype: :class:`matplotlib.axes`

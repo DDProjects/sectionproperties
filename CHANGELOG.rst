@@ -1,6 +1,64 @@
 Changelog:
 ==========
 
+v2.1.5:
+-------
+
+- Fix shapely 2.0 imports and STRtree implementation, with thanks to `@normanrichardson <https://github.com/normanrichardson>`_
+- Add support for python 3.10, drop support for python 3.7
+
+**Full changelog:** `2.1.4...2.1.5 <https://github.com/robbievanleeuwen/section-properties/compare/2.1.4...2.1.5>`_
+
+v2.1.4:
+-------
+
+- Add side bar option to ``concrete_rectangular_section()``, thanks to `@Agent6-6-6 <https://github.com/Agent6-6-6>`_
+- Fix difference operation raising an error, thanks to `@connorferster <https://github.com/connorferster>`_
+- Added ``concrete_column_section()`` and ``add_bar()`` methods, thanks to `@connorferster <https://github.com/connorferster>`_
+
+**Full changelog:** `2.1.3...2.1.4 <https://github.com/robbievanleeuwen/section-properties/compare/2.1.3...2.1.4>`_
+
+v2.1.3:
+-------
+
+- Retrieve cross-section stresses at any point using ``get_stress_at_point()`` or
+  ``get_stress_at_points()``, many thanks to `@normanrichardson <https://github.com/normanrichardson>`_
+- Fix plot legend formatting, thanks to `@Agent6-6-6 <https://github.com/Agent6-6-6>`_
+- Added ability for ``Geometry.align_center()`` and ``CompoundGeometry.align_center()``
+  to accept an ``x``, ``y`` coordinate as a valid input, thanks to `@connorferster <https://github.com/connorferster>`_
+- Only require a warping analysis to be performed for a stress analysis if the shear
+  force or twisting moment is non-zero.
+
+**Full changelog:** `2.1.2...2.1.3 <https://github.com/robbievanleeuwen/section-properties/compare/2.1.2...2.1.3>`_
+
+v2.1.2:
+-------
+
+- Make rhino-shapley-interop an optional dependency
+
+**Full changelog:** `2.1.1...2.1.2 <https://github.com/robbievanleeuwen/section-properties/compare/2.1.1...2.1.2>`_
+
+v2.1.1:
+-------
+
+- Use Lagrangian multiplier for calculation of torsion properties
+- Add more plotting options to ``plot_geometry()``
+
+**Full changelog:** `2.1.0...2.1.1 <https://github.com/robbievanleeuwen/section-properties/compare/2.1.0...2.1.1>`_
+
+v2.1.0:
+-------
+
+- Add ``bulb_section()`` to steel sections library, thanks to `@zmpulse <https://github.com/zmpulse>`_
+- Add progress bar and pretty output using `rich <https://github.com/Textualize/rich>`_
+- Fix logic of generating holes in CompoundGeometry using the subtraction method, thanks to `@connorferster <https://github.com/connorferster>`_
+- Expand testing suite and documentation, thanks to `@czarified <https://github.com/czarified>`_
+- Fix bug with plastic calculation when material properties are specified
+- Add warning message for disconnected geometries when trying to calculate warping properties, thanks to `@connorferster <https://github.com/connorferster>`_
+- Fix bug with material properties not being assigned when using the ``CompoundGeometry.from_points()`` method, thanks to `@connorferster <https://github.com/connorferster>`_
+
+**Full changelog:** `2.0.3...2.1.0 <https://github.com/robbievanleeuwen/section-properties/compare/2.0.3...2.1.0>`_
+
 v2.0.3:
 -------
 
@@ -22,10 +80,14 @@ v2.0.2:
 - Fix bug in super_t_girder_section() which caused type 5 to be returned in all cases
 - Require matplotlib >= 3.4 for CenteredNorm
 
+**Full changelog:** `2.0.1...2.0.2 <https://github.com/robbievanleeuwen/section-properties/compare/2.0.1...2.0.2>`_
+
 v2.0.1:
 -------
 
 - Fix issue with library module
+
+**Full changelog:** `2.0.0...2.0.1 <https://github.com/robbievanleeuwen/section-properties/compare/2.0.0...2.0.1>`_
 
 v2.0.0:
 -------
